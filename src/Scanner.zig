@@ -977,18 +977,3 @@ fn testIncomplete(input: []const u8) !void {
     }
     try testing.expectError(error.UnexpectedEndOfInput, scanner.endInput());
 }
-
-pub fn main() !void {
-    const doc =
-        \\Hello, world!
-    ;
-    var scanner = Scanner{};
-    for (doc, 0..) |c, i| {
-        const token = scanner.next(c) catch |e| {
-            std.debug.print("scanner state on error: {}\n", .{scanner});
-            return e;
-        };
-        std.debug.print("{}: {}: {?}\n", .{ i, std.fmt.fmtSliceEscapeLower(&.{c}), token });
-    }
-    try scanner.endInput();
-}
