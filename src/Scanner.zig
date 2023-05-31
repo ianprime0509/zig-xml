@@ -42,6 +42,9 @@
 /// The current state of the scanner.
 state: State = .start,
 /// The current byte position in the input.
+///
+/// This is not necessarily the byte position relative to the start of the
+/// document: see the `resetPos` function and the documentation of `Token`.
 pos: usize = 0,
 /// The current element nesting depth.
 depth: usize = 0,
@@ -66,25 +69,52 @@ pub const Range = struct {
 };
 
 /// A single XML token.
+///
+/// The choice of tokens is designed to allow the buffer position to be reset as
+/// often as reasonably possible ("forgetting" any range information before the
+/// reset), supported by the following design decisions:
+///
+/// - Tokens contain only the immediately necessary context: for example, the
+///   `attribute_content` token does not store any information about the
+///   attribute name, since it may have been processed many resets ago (if the
+///   attribute content is very long).
+/// - Multiple `content` tokens may be returned for a single enclosing context
+///   (e.g. element or attribute) if the buffer is reset in the middle of
+///   content or there are other necessary intervening factors, such as CDATA
+///   in the middle of normal (non-CDATA) element content.
+///
+/// Note also that there are no explicit `end` tokens except for elements,
+/// since other constructs cannot nest, so the structure is never unclear (and
+/// because otherwise the `next` function would sometimes need to return more
+/// than one token, which it can't).
 pub const Token = union(enum) {
     /// Continue processing: no new token to report yet.
     ok,
     /// XML declaration.
     xml_declaration: struct { version: Range, encoding: ?Range = null, standalone: ?Range = null },
-    /// Element start tag. Emitted after parsing the start tag name but before any attributes.
+    /// Element start tag.
     element_start: struct { name: Range },
-    /// Element attribute.
-    attribute: struct { name: Range, value: Range },
-    /// Element end tag. Emitted after parsing the end of the tag.
+    /// Element content.
+    ///
+    /// Also indicates whether the content is CDATA, since this affects
+    /// whether references should be expanded by a higher-level parser.
+    element_content: struct { content: Range, cdata: bool },
+    /// Element end tag.
     element_end: struct { name: Range },
-    /// Comment.
-    comment: struct { content: Range },
-    /// Processing instruction (PI).
-    pi: struct { target: Range, content: Range },
-    /// CDATA.
-    cdata: struct { content: Range },
-    /// Text content.
-    text: struct { content: Range },
+    /// End of an empty element.
+    element_end_empty,
+    /// Attribute start.
+    attribute_start: struct { name: Range },
+    /// Attribute value content.
+    attribute_content: struct { content: Range },
+    /// Comment start.
+    comment_start,
+    /// Comment content.
+    comment_content: struct { content: Range },
+    /// Processing instruction (PI) start.
+    pi_start: struct { target: Range },
+    /// PI content.
+    pi_content: struct { content: Range },
 };
 
 /// The possible states of the parser.
@@ -139,9 +169,9 @@ const State = union(enum) {
     /// XML declaration standalone declaration value.
     xml_decl_standalone_value: struct { version: Range, encoding: ?Range, start: usize, quote: u8 },
     /// XML declaration after standalone declaration.
-    xml_decl_after_standalone: struct { version: Range, encoding: ?Range, standalone: ?Range },
+    xml_decl_after_standalone,
     /// End of XML declaration after '?'.
-    xml_decl_end: struct { version: Range, encoding: ?Range, standalone: ?Range },
+    xml_decl_end,
     /// Start of document after XML declaration.
     start_after_xml_decl,
 
@@ -157,18 +187,18 @@ const State = union(enum) {
     /// Comment after consuming one '-'.
     comment_maybe_before_end: struct { start: usize },
     /// Comment after consuming '--'.
-    comment_before_end: struct { content: Range },
+    comment_before_end,
 
     /// PI after '<?'.
     pi,
     /// In PI target name.
     pi_target: struct { start: usize },
     /// After PI target.
-    pi_after_target: struct { target: Range },
+    pi_after_target,
     /// In PI content after target name.
-    pi_content: struct { target: Range, start: usize },
+    pi_content: struct { start: usize },
     /// Possible end of PI after '?'.
-    pi_maybe_end: struct { target: Range, content_start: usize },
+    pi_maybe_end: struct { content_start: usize },
 
     /// A '<![' (and possibly some part of 'CDATA[' after it) has been encountered.
     cdata_before_start: struct { left: []const u8 },
@@ -180,45 +210,40 @@ const State = union(enum) {
     /// Name of element start tag.
     element_start_name: struct { start: usize },
     /// In element start tag after name (and possibly after one or more attributes).
-    element_start_after_name: struct { name: Range },
+    element_start_after_name,
     /// In element start tag after encountering '/' (indicating an empty element).
-    element_start_empty: struct { name: Range },
+    element_start_empty,
 
     /// Attribute name.
-    ///
-    /// Note that attribute states must store the range corresponding to the
-    /// element name, because we could be in an empty element and will need the
-    /// element name to emit the `element_end` token (we will not get the name
-    /// again at this point).
-    attribute_name: struct { element_name: Range, start: usize },
+    attribute_name: struct { start: usize },
     /// After attribute name but before '='.
-    attribute_after_name: struct { element_name: Range, name: Range },
+    attribute_after_name,
     /// After attribute '='.
-    attribute_after_equals: struct { element_name: Range, name: Range },
+    attribute_after_equals,
     /// Attribute value.
     ///
     /// The `quote` field is intended to avoid duplication of states into
     /// single-quote and double-quote variants.
-    attribute_value: struct { element_name: Range, name: Range, start: usize, quote: u8 },
+    attribute_value: struct { start: usize, quote: u8 },
     /// Attribute value after encountering '&'.
-    attribute_value_ref_start: struct { element_name: Range, name: Range, value_start: usize, value_quote: u8 },
+    attribute_value_ref_start: struct { value_start: usize, value_quote: u8 },
     /// Attribute value within an entity reference name.
-    attribute_value_entity_ref_name: struct { element_name: Range, name: Range, value_start: usize, value_quote: u8 },
+    attribute_value_entity_ref_name: struct { value_start: usize, value_quote: u8 },
     /// Attribute value after encountering '&#'.
-    attribute_value_char_ref_start: struct { element_name: Range, name: Range, value_start: usize, value_quote: u8 },
+    attribute_value_char_ref_start: struct { value_start: usize, value_quote: u8 },
     /// Attribute value within a decimal character reference.
-    attribute_value_char_ref_decimal: struct { element_name: Range, name: Range, value_start: usize, value_quote: u8 },
+    attribute_value_char_ref_decimal: struct { value_start: usize, value_quote: u8 },
     /// Attribute value within a hex character reference.
-    attribute_value_char_ref_hex: struct { element_name: Range, name: Range, value_start: usize, value_quote: u8 },
+    attribute_value_char_ref_hex: struct { value_start: usize, value_quote: u8 },
 
     /// Element end tag after consuming '</'.
     element_end,
     /// Name of element end tag.
     element_end_name: struct { start: usize },
     /// In element end tag after name.
-    element_end_after_name: struct { name: Range },
+    element_end_after_name,
 
-    /// Element content (character data and markup).
+    /// Element content (text).
     content: struct { start: usize },
     /// Element content after encountering '&'.
     content_ref_start: struct { content_start: usize },
@@ -279,10 +304,10 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             self.state = .{ .pi_target = .{ .start = state.start } };
             return .ok;
         } else if (isSpaceChar(c) and self.pos > state.start) {
-            self.state = .{ .pi_after_target = .{ .target = .{ .start = state.start, .end = self.pos } } };
-            return .ok;
+            self.state = .pi_after_target;
+            return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
         } else if (c == '?' and self.pos > state.start) {
-            self.state = .{ .pi_maybe_end = .{ .target = .{ .start = state.start, .end = self.pos }, .content_start = self.pos } };
+            self.state = .{ .pi_maybe_end = .{ .content_start = self.pos } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -344,8 +369,8 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             self.state = .{ .xml_decl_standalone_name = .{ .version = state.version, .encoding = null, .left = "tandalone" } };
             return .ok;
         } else if (c == '?') {
-            self.state = .{ .xml_decl_end = .{ .version = state.version, .encoding = null, .standalone = null } };
-            return .ok;
+            self.state = .xml_decl_end;
+            return .{ .xml_declaration = .{ .version = state.version, .encoding = null, .standalone = null } };
         } else {
             return error.SyntaxError;
         },
@@ -394,8 +419,8 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             self.state = .{ .xml_decl_standalone_name = .{ .version = state.version, .encoding = state.encoding, .left = "tandalone" } };
             return .ok;
         } else if (c == '?') {
-            self.state = .{ .xml_decl_end = .{ .version = state.version, .encoding = state.encoding, .standalone = null } };
-            return .ok;
+            self.state = .xml_decl_end;
+            return .{ .xml_declaration = .{ .version = state.version, .encoding = state.encoding, .standalone = null } };
         } else {
             return error.SyntaxError;
         },
@@ -430,26 +455,26 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .xml_decl_standalone_value => |state| if (c == state.quote) {
-            self.state = .{ .xml_decl_after_standalone = .{ .version = state.version, .encoding = state.encoding, .standalone = .{ .start = state.start, .end = self.pos } } };
-            return .ok;
+            self.state = .xml_decl_after_standalone;
+            return .{ .xml_declaration = .{ .version = state.version, .encoding = state.encoding, .standalone = .{ .start = state.start, .end = self.pos } } };
         } else if (isValidChar(c)) {
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_standalone => |state| if (isSpaceChar(c)) {
+        .xml_decl_after_standalone => if (isSpaceChar(c)) {
             return .ok;
         } else if (c == '?') {
-            self.state = .{ .xml_decl_end = .{ .version = state.version, .encoding = state.encoding, .standalone = state.standalone } };
+            self.state = .xml_decl_end;
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_end => |state| if (c == '>') {
+        .xml_decl_end => if (c == '>') {
             self.state = .start_after_xml_decl;
-            return .{ .xml_declaration = .{ .version = state.version, .encoding = state.encoding, .standalone = state.standalone } };
+            return .ok;
         } else {
             return error.SyntaxError;
         },
@@ -492,7 +517,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
 
         .comment_before_start => if (c == '-') {
             self.state = .{ .comment = .{ .start = self.pos + 1 } };
-            return .ok;
+            return .comment_start;
         } else {
             return error.SyntaxError;
         },
@@ -507,8 +532,8 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .comment_maybe_before_end => |state| if (c == '-') {
-            self.state = .{ .comment_before_end = .{ .content = .{ .start = state.start, .end = self.pos - 1 } } };
-            return .ok;
+            self.state = .comment_before_end;
+            return .{ .comment_content = .{ .content = .{ .start = state.start, .end = self.pos - 1 } } };
         } else if (isValidChar(c)) {
             self.state = .{ .comment = .{ .start = state.start } };
             return .ok;
@@ -516,9 +541,9 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .comment_before_end => |state| if (c == '>') {
+        .comment_before_end => if (c == '>') {
             self.state = .{ .content = .{ .start = self.pos + 1 } };
-            return .{ .comment = .{ .content = state.content } };
+            return .ok;
         } else {
             return error.SyntaxError;
         },
@@ -533,29 +558,29 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .pi_target => |state| if (isNameChar(c)) {
             return .ok;
         } else if (isSpaceChar(c)) {
-            self.state = .{ .pi_after_target = .{ .target = .{ .start = state.start, .end = self.pos } } };
-            return .ok;
+            self.state = .pi_after_target;
+            return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
         } else if (c == '?') {
-            self.state = .{ .pi_maybe_end = .{ .target = .{ .start = state.start, .end = self.pos }, .content_start = self.pos } };
-            return .ok;
+            self.state = .{ .pi_maybe_end = .{ .content_start = self.pos } };
+            return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
         } else {
             return error.SyntaxError;
         },
 
-        .pi_after_target => |state| if (isSpaceChar(c)) {
+        .pi_after_target => if (isSpaceChar(c)) {
             return .ok;
         } else if (isValidChar(c)) {
-            self.state = .{ .pi_content = .{ .target = state.target, .start = self.pos } };
+            self.state = .{ .pi_content = .{ .start = self.pos } };
             return .ok;
         } else if (c == '?') {
-            self.state = .{ .pi_maybe_end = .{ .target = state.target, .content_start = self.pos } };
+            self.state = .{ .pi_maybe_end = .{ .content_start = self.pos } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
         .pi_content => |state| if (c == '?') {
-            self.state = .{ .pi_maybe_end = .{ .target = state.target, .content_start = state.start } };
+            self.state = .{ .pi_maybe_end = .{ .content_start = state.start } };
             return .ok;
         } else if (isValidChar(c)) {
             return .ok;
@@ -565,9 +590,9 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
 
         .pi_maybe_end => |state| if (c == '>') {
             self.state = .{ .content = .{ .start = self.pos + 1 } };
-            return .{ .pi = .{ .target = state.target, .content = .{ .start = state.content_start, .end = self.pos - 1 } } };
+            return .{ .pi_content = .{ .content = .{ .start = state.content_start, .end = self.pos - 1 } } };
         } else if (isValidChar(c)) {
-            self.state = .{ .pi_content = .{ .target = state.target, .start = state.content_start } };
+            self.state = .{ .pi_content = .{ .start = state.content_start } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -596,7 +621,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .cdata_maybe_end => |state| if (c == state.left[0]) {
             if (state.left.len == 1) {
                 self.state = .{ .content = .{ .start = self.pos + 1 } };
-                return .{ .cdata = .{ .content = .{ .start = state.content_start, .end = self.pos - "]]".len } } };
+                return .{ .element_content = .{ .content = .{ .start = state.content_start, .end = self.pos - "]]".len }, .cdata = true } };
             } else {
                 self.state = .{ .cdata_maybe_end = .{ .content_start = state.content_start, .left = state.left[1..] } };
                 return .ok;
@@ -612,11 +637,11 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return .ok;
         } else if (isSpaceChar(c)) {
             const name = Range{ .start = state.start, .end = self.pos };
-            self.state = .{ .element_start_after_name = .{ .name = name } };
+            self.state = .element_start_after_name;
             return .{ .element_start = .{ .name = name } };
         } else if (c == '/') {
             const name = Range{ .start = state.start, .end = self.pos };
-            self.state = .{ .element_start_empty = .{ .name = name } };
+            self.state = .element_start_empty;
             return .{ .element_start = .{ .name = name } };
         } else if (c == '>') {
             self.depth += 1;
@@ -626,13 +651,13 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .element_start_after_name => |state| if (isSpaceChar(c)) {
+        .element_start_after_name => if (isSpaceChar(c)) {
             return .ok;
         } else if (isNameStartChar(c)) {
-            self.state = .{ .attribute_name = .{ .element_name = state.name, .start = self.pos } };
+            self.state = .{ .attribute_name = .{ .start = self.pos } };
             return .ok;
         } else if (c == '/') {
-            self.state = .{ .element_start_empty = .{ .name = state.name } };
+            self.state = .element_start_empty;
             return .ok;
         } else if (c == '>') {
             self.depth += 1;
@@ -642,12 +667,12 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .element_start_empty => |state| if (c == '>') {
+        .element_start_empty => if (c == '>') {
             if (self.depth == 0) {
                 self.seen_root_element = true;
             }
             self.state = .{ .content = .{ .start = self.pos + 1 } };
-            return .{ .element_end = .{ .name = state.name } };
+            return .element_end_empty;
         } else {
             return error.SyntaxError;
         },
@@ -655,38 +680,38 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .attribute_name => |state| if (isNameChar(c)) {
             return .ok;
         } else if (isSpaceChar(c)) {
-            self.state = .{ .attribute_after_name = .{ .element_name = state.element_name, .name = .{ .start = state.start, .end = self.pos } } };
+            self.state = .attribute_after_name;
+            return .{ .attribute_start = .{ .name = .{ .start = state.start, .end = self.pos } } };
+        } else if (c == '=') {
+            self.state = .attribute_after_equals;
+            return .{ .attribute_start = .{ .name = .{ .start = state.start, .end = self.pos } } };
+        } else {
+            return error.SyntaxError;
+        },
+
+        .attribute_after_name => if (isSpaceChar(c)) {
             return .ok;
         } else if (c == '=') {
-            self.state = .{ .attribute_after_equals = .{ .element_name = state.element_name, .name = .{ .start = state.start, .end = self.pos } } };
+            self.state = .attribute_after_equals;
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .attribute_after_name => |state| if (isSpaceChar(c)) {
-            return .ok;
-        } else if (c == '=') {
-            self.state = .{ .attribute_after_equals = .{ .element_name = state.element_name, .name = state.name } };
-            return .ok;
-        } else {
-            return error.SyntaxError;
-        },
-
-        .attribute_after_equals => |state| if (isSpaceChar(c)) {
+        .attribute_after_equals => if (isSpaceChar(c)) {
             return .ok;
         } else if (c == '"' or c == '\'') {
-            self.state = .{ .attribute_value = .{ .element_name = state.element_name, .name = state.name, .start = self.pos + 1, .quote = c } };
+            self.state = .{ .attribute_value = .{ .start = self.pos + 1, .quote = c } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
         .attribute_value => |state| if (c == state.quote) {
-            self.state = .{ .element_start_after_name = .{ .name = state.element_name } };
-            return .{ .attribute = .{ .name = state.name, .value = .{ .start = state.start, .end = self.pos } } };
+            self.state = .element_start_after_name;
+            return .{ .attribute_content = .{ .content = .{ .start = state.start, .end = self.pos } } };
         } else if (c == '&') {
-            self.state = .{ .attribute_value_ref_start = .{ .element_name = state.element_name, .name = state.name, .value_start = state.start, .value_quote = state.quote } };
+            self.state = .{ .attribute_value_ref_start = .{ .value_start = state.start, .value_quote = state.quote } };
             return .ok;
         } else if (isValidChar(c)) {
             return .ok;
@@ -695,10 +720,10 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .attribute_value_ref_start => |state| if (isNameStartChar(c)) {
-            self.state = .{ .attribute_value_entity_ref_name = .{ .element_name = state.element_name, .name = state.name, .value_start = state.value_start, .value_quote = state.value_quote } };
+            self.state = .{ .attribute_value_entity_ref_name = .{ .value_start = state.value_start, .value_quote = state.value_quote } };
             return .ok;
         } else if (c == '#') {
-            self.state = .{ .attribute_value_char_ref_start = .{ .element_name = state.element_name, .name = state.name, .value_start = state.value_start, .value_quote = state.value_quote } };
+            self.state = .{ .attribute_value_char_ref_start = .{ .value_start = state.value_start, .value_quote = state.value_quote } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -707,17 +732,17 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .attribute_value_entity_ref_name => |state| if (isNameChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .attribute_value = .{ .element_name = state.element_name, .name = state.name, .start = state.value_start, .quote = state.value_quote } };
+            self.state = .{ .attribute_value = .{ .start = state.value_start, .quote = state.value_quote } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
         .attribute_value_char_ref_start => |state| if (isDigitChar(c)) {
-            self.state = .{ .attribute_value_char_ref_decimal = .{ .element_name = state.element_name, .name = state.name, .value_start = state.value_start, .value_quote = state.value_quote } };
+            self.state = .{ .attribute_value_char_ref_decimal = .{ .value_start = state.value_start, .value_quote = state.value_quote } };
             return .ok;
         } else if (c == 'x') {
-            self.state = .{ .attribute_value_char_ref_hex = .{ .element_name = state.element_name, .name = state.name, .value_start = state.value_start, .value_quote = state.value_quote } };
+            self.state = .{ .attribute_value_char_ref_hex = .{ .value_start = state.value_start, .value_quote = state.value_quote } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -726,7 +751,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .attribute_value_char_ref_decimal => |state| if (isDigitChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .attribute_value = .{ .element_name = state.element_name, .name = state.name, .start = state.value_start, .quote = state.value_quote } };
+            self.state = .{ .attribute_value = .{ .start = state.value_start, .quote = state.value_quote } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -735,7 +760,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .attribute_value_char_ref_hex => |state| if (isHexDigitChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .attribute_value = .{ .element_name = state.element_name, .name = state.name, .start = state.value_start, .quote = state.value_quote } };
+            self.state = .{ .attribute_value = .{ .start = state.value_start, .quote = state.value_quote } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -751,8 +776,8 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .element_end_name => |state| if (isNameChar(c)) {
             return .ok;
         } else if (isSpaceChar(c)) {
-            self.state = .{ .element_end_after_name = .{ .name = .{ .start = state.start, .end = self.pos } } };
-            return .ok;
+            self.state = .element_end_after_name;
+            return .{ .element_end = .{ .name = .{ .start = state.start, .end = self.pos } } };
         } else if (c == '>') {
             self.depth -= 1;
             if (self.depth == 0) {
@@ -764,7 +789,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .element_end_after_name => |state| if (isSpaceChar(c)) {
+        .element_end_after_name => if (isSpaceChar(c)) {
             return .ok;
         } else if (c == '>') {
             self.depth -= 1;
@@ -772,7 +797,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
                 self.seen_root_element = true;
             }
             self.state = .{ .content = .{ .start = self.pos + 1 } };
-            return .{ .element_end = .{ .name = state.name } };
+            return .ok;
         } else {
             return error.SyntaxError;
         },
@@ -787,7 +812,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
                 // the root element (which will just be whitespace).
                 return .ok;
             } else {
-                return .{ .text = .{ .content = content } };
+                return .{ .element_content = .{ .content = content, .cdata = false } };
             }
         } else if (self.depth > 0 and c == '&') {
             self.state = .{ .content_ref_start = .{ .content_start = state.start } };
@@ -907,11 +932,11 @@ inline fn isNameChar(c: u8) bool {
 test "empty root element" {
     try testValid("<element/>", &.{
         .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
-        .{ .element_end = .{ .name = .{ .start = 1, .end = 8 } } },
+        .element_end_empty,
     });
     try testValid("<element />", &.{
         .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
-        .{ .element_end = .{ .name = .{ .start = 1, .end = 8 } } },
+        .element_end_empty,
     });
 }
 
@@ -922,10 +947,10 @@ test "root element with no content" {
     });
 }
 
-test "text content" {
+test "element content" {
     try testValid("<message>Hello, world!</message>", &.{
         .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
-        .{ .text = .{ .content = .{ .start = 9, .end = 22 } } },
+        .{ .element_content = .{ .content = .{ .start = 9, .end = 22 }, .cdata = false } },
         .{ .element_end = .{ .name = .{ .start = 24, .end = 31 } } },
     });
 }
@@ -937,7 +962,7 @@ test "XML declaration" {
     , &.{
         .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 } } },
         .{ .element_start = .{ .name = .{ .start = 23, .end = 27 } } },
-        .{ .element_end = .{ .name = .{ .start = 23, .end = 27 } } },
+        .element_end_empty,
     });
     try testValid(
         \\<?xml version = "1.0"?>
@@ -945,7 +970,7 @@ test "XML declaration" {
     , &.{
         .{ .xml_declaration = .{ .version = .{ .start = 17, .end = 20 } } },
         .{ .element_start = .{ .name = .{ .start = 25, .end = 29 } } },
-        .{ .element_end = .{ .name = .{ .start = 25, .end = 29 } } },
+        .element_end_empty,
     });
     try testValid(
         \\<?xml version="1.0" encoding="UTF-8"?>
@@ -953,7 +978,7 @@ test "XML declaration" {
     , &.{
         .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 }, .encoding = .{ .start = 30, .end = 35 } } },
         .{ .element_start = .{ .name = .{ .start = 40, .end = 44 } } },
-        .{ .element_end = .{ .name = .{ .start = 40, .end = 44 } } },
+        .element_end_empty,
     });
     try testValid(
         \\<?xml version = "1.0" encoding = "UTF-8"?>
@@ -961,7 +986,7 @@ test "XML declaration" {
     , &.{
         .{ .xml_declaration = .{ .version = .{ .start = 17, .end = 20 }, .encoding = .{ .start = 34, .end = 39 } } },
         .{ .element_start = .{ .name = .{ .start = 44, .end = 48 } } },
-        .{ .element_end = .{ .name = .{ .start = 44, .end = 48 } } },
+        .element_end_empty,
     });
     try testValid(
         \\<?xml version="1.0" standalone="yes"?>
@@ -969,7 +994,7 @@ test "XML declaration" {
     , &.{
         .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 }, .standalone = .{ .start = 32, .end = 35 } } },
         .{ .element_start = .{ .name = .{ .start = 40, .end = 44 } } },
-        .{ .element_end = .{ .name = .{ .start = 40, .end = 44 } } },
+        .element_end_empty,
     });
     try testValid(
         \\<?xml version = "1.0" standalone = "yes"?>
@@ -977,7 +1002,7 @@ test "XML declaration" {
     , &.{
         .{ .xml_declaration = .{ .version = .{ .start = 17, .end = 20 }, .standalone = .{ .start = 36, .end = 39 } } },
         .{ .element_start = .{ .name = .{ .start = 44, .end = 48 } } },
-        .{ .element_end = .{ .name = .{ .start = 44, .end = 48 } } },
+        .element_end_empty,
     });
     try testValid(
         \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -985,7 +1010,7 @@ test "XML declaration" {
     , &.{
         .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 }, .encoding = .{ .start = 30, .end = 35 }, .standalone = .{ .start = 49, .end = 52 } } },
         .{ .element_start = .{ .name = .{ .start = 57, .end = 61 } } },
-        .{ .element_end = .{ .name = .{ .start = 57, .end = 61 } } },
+        .element_end_empty,
     });
     try testValid(
         \\<?xml version = "1.0" encoding = "UTF-8" standalone = "yes"?>
@@ -993,7 +1018,7 @@ test "XML declaration" {
     , &.{
         .{ .xml_declaration = .{ .version = .{ .start = 17, .end = 20 }, .encoding = .{ .start = 34, .end = 39 }, .standalone = .{ .start = 55, .end = 58 } } },
         .{ .element_start = .{ .name = .{ .start = 63, .end = 67 } } },
-        .{ .element_end = .{ .name = .{ .start = 63, .end = 67 } } },
+        .element_end_empty,
     });
 }
 
@@ -1002,8 +1027,9 @@ test "references" {
         \\<element attribute="Hello&#x2C;&#32;world &amp; friends!">&lt;Hi&#33;&#x21;&gt;</element>
     , &.{
         .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
-        .{ .attribute = .{ .name = .{ .start = 9, .end = 18 }, .value = .{ .start = 20, .end = 56 } } },
-        .{ .text = .{ .content = .{ .start = 58, .end = 79 } } },
+        .{ .attribute_start = .{ .name = .{ .start = 9, .end = 18 } } },
+        .{ .attribute_content = .{ .content = .{ .start = 20, .end = 56 } } },
+        .{ .element_content = .{ .content = .{ .start = 58, .end = 79 }, .cdata = false } },
         .{ .element_end = .{ .name = .{ .start = 81, .end = 88 } } },
     });
 }
@@ -1015,7 +1041,7 @@ test "complex document" {
         \\<!-- A processing instruction with content follows -->
         \\<?some-pi-with-content content?>
         \\<root>
-        \\  <p>Hello, <![CDATA[world!]]></p>
+        \\  <p class="test">Hello, <![CDATA[world!]]></p>
         \\  <line />
         \\  <?another-pi?>
         \\  Text content goes here.
@@ -1028,30 +1054,38 @@ test "complex document" {
         \\
     , &.{
         .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 } } },
-        .{ .pi = .{ .target = .{ .start = 24, .end = 31 }, .content = .{ .start = 31, .end = 31 } } }, // some-pi
-        .{ .comment = .{ .content = .{ .start = 38, .end = 85 } } },
-        .{ .pi = .{ .target = .{ .start = 91, .end = 111 }, .content = .{ .start = 112, .end = 119 } } }, // some-pi-with-content
+        .{ .pi_start = .{ .target = .{ .start = 24, .end = 31 } } }, // some-pi
+        .{ .pi_content = .{ .content = .{ .start = 31, .end = 31 } } },
+        .comment_start,
+        .{ .comment_content = .{ .content = .{ .start = 38, .end = 85 } } },
+        .{ .pi_start = .{ .target = .{ .start = 91, .end = 111 } } }, // some-pi-with-content
+        .{ .pi_content = .{ .content = .{ .start = 112, .end = 119 } } },
         .{ .element_start = .{ .name = .{ .start = 123, .end = 127 } } }, // root
-        .{ .text = .{ .content = .{ .start = 128, .end = 131 } } },
+        .{ .element_content = .{ .content = .{ .start = 128, .end = 131 }, .cdata = false } },
         .{ .element_start = .{ .name = .{ .start = 132, .end = 133 } } }, // p
-        .{ .text = .{ .content = .{ .start = 134, .end = 141 } } },
-        .{ .cdata = .{ .content = .{ .start = 150, .end = 156 } } },
-        .{ .element_end = .{ .name = .{ .start = 161, .end = 162 } } }, // /p
-        .{ .text = .{ .content = .{ .start = 163, .end = 166 } } },
-        .{ .element_start = .{ .name = .{ .start = 167, .end = 171 } } }, // line
-        .{ .element_end = .{ .name = .{ .start = 167, .end = 171 } } }, // /line
-        .{ .text = .{ .content = .{ .start = 174, .end = 177 } } },
-        .{ .pi = .{ .target = .{ .start = 179, .end = 189 }, .content = .{ .start = 189, .end = 189 } } }, // another-pi
-        .{ .text = .{ .content = .{ .start = 191, .end = 220 } } },
-        .{ .element_start = .{ .name = .{ .start = 221, .end = 224 } } }, // div
-        .{ .element_start = .{ .name = .{ .start = 226, .end = 227 } } }, // p
-        .{ .text = .{ .content = .{ .start = 228, .end = 233 } } },
-        .{ .element_end = .{ .name = .{ .start = 235, .end = 236 } } }, // /p
-        .{ .element_end = .{ .name = .{ .start = 239, .end = 242 } } }, // /div
-        .{ .text = .{ .content = .{ .start = 243, .end = 244 } } },
-        .{ .element_end = .{ .name = .{ .start = 246, .end = 250 } } }, // /root
-        .{ .comment = .{ .content = .{ .start = 256, .end = 312 } } },
-        .{ .pi = .{ .target = .{ .start = 319, .end = 326 }, .content = .{ .start = 327, .end = 338 } } }, // comment
+        .{ .attribute_start = .{ .name = .{ .start = 134, .end = 139 } } },
+        .{ .attribute_content = .{ .content = .{ .start = 141, .end = 145 } } },
+        .{ .element_content = .{ .content = .{ .start = 147, .end = 154 }, .cdata = false } },
+        .{ .element_content = .{ .content = .{ .start = 163, .end = 169 }, .cdata = true } },
+        .{ .element_end = .{ .name = .{ .start = 174, .end = 175 } } }, // /p
+        .{ .element_content = .{ .content = .{ .start = 176, .end = 179 }, .cdata = false } },
+        .{ .element_start = .{ .name = .{ .start = 180, .end = 184 } } }, // line
+        .element_end_empty,
+        .{ .element_content = .{ .content = .{ .start = 187, .end = 190 }, .cdata = false } },
+        .{ .pi_start = .{ .target = .{ .start = 192, .end = 202 } } }, // another-pi
+        .{ .pi_content = .{ .content = .{ .start = 202, .end = 202 } } },
+        .{ .element_content = .{ .content = .{ .start = 204, .end = 233 }, .cdata = false } },
+        .{ .element_start = .{ .name = .{ .start = 234, .end = 237 } } }, // div
+        .{ .element_start = .{ .name = .{ .start = 239, .end = 240 } } }, // p
+        .{ .element_content = .{ .content = .{ .start = 241, .end = 246 }, .cdata = false } },
+        .{ .element_end = .{ .name = .{ .start = 248, .end = 249 } } }, // /p
+        .{ .element_end = .{ .name = .{ .start = 252, .end = 255 } } }, // /div
+        .{ .element_content = .{ .content = .{ .start = 256, .end = 257 }, .cdata = false } },
+        .{ .element_end = .{ .name = .{ .start = 259, .end = 263 } } }, // /root
+        .comment_start,
+        .{ .comment_content = .{ .content = .{ .start = 269, .end = 325 } } },
+        .{ .pi_start = .{ .target = .{ .start = 332, .end = 339 } } }, // comment
+        .{ .pi_content = .{ .content = .{ .start = 340, .end = 351 } } },
     });
 }
 
