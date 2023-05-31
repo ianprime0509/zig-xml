@@ -19,6 +19,10 @@
 //! - Does not do any special handling of namespaces.
 //! - Does not perform any sort of processing on text content or attribute
 //!   values (including normalization, expansion of entities, etc.).
+//!   - However, note that entity and character references in text content and
+//!     attribute values _are_ validated for correct syntax, although their
+//!     content is not (they may reference non-existent entities or
+//!     out-of-bounds characters).
 //! - Does not process DTDs in any way besides parsing them (TODO: see below).
 //!
 //! Unintentional (temporary) limitations (which will be removed over time):
@@ -196,6 +200,16 @@ const State = union(enum) {
     /// The `quote` field is intended to avoid duplication of states into
     /// single-quote and double-quote variants.
     attribute_value: struct { element_name: Range, name: Range, start: usize, quote: u8 },
+    /// Attribute value after encountering '&'.
+    attribute_value_ref_start: struct { element_name: Range, name: Range, value_start: usize, value_quote: u8 },
+    /// Attribute value within an entity reference name.
+    attribute_value_entity_ref_name: struct { element_name: Range, name: Range, value_start: usize, value_quote: u8 },
+    /// Attribute value after encountering '&#'.
+    attribute_value_char_ref_start: struct { element_name: Range, name: Range, value_start: usize, value_quote: u8 },
+    /// Attribute value within a decimal character reference.
+    attribute_value_char_ref_decimal: struct { element_name: Range, name: Range, value_start: usize, value_quote: u8 },
+    /// Attribute value within a hex character reference.
+    attribute_value_char_ref_hex: struct { element_name: Range, name: Range, value_start: usize, value_quote: u8 },
 
     /// Element end tag after consuming '</'.
     element_end,
@@ -206,6 +220,16 @@ const State = union(enum) {
 
     /// Element content (character data and markup).
     content: struct { start: usize },
+    /// Element content after encountering '&'.
+    content_ref_start: struct { content_start: usize },
+    /// Element content within an entity reference name.
+    content_entity_ref_name: struct { content_start: usize },
+    /// Element content after encountering '&#'.
+    content_char_ref_start: struct { content_start: usize },
+    /// Element content within a decimal character reference.
+    content_char_ref_decimal: struct { content_start: usize },
+    /// Element content within a hex character reference.
+    content_char_ref_hex: struct { content_start: usize },
 };
 
 /// Accepts a single byte of input, returning the token found or an error.
@@ -661,7 +685,57 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .attribute_value => |state| if (c == state.quote) {
             self.state = .{ .element_start_after_name = .{ .name = state.element_name } };
             return .{ .attribute = .{ .name = state.name, .value = .{ .start = state.start, .end = self.pos } } };
+        } else if (c == '&') {
+            self.state = .{ .attribute_value_ref_start = .{ .element_name = state.element_name, .name = state.name, .value_start = state.start, .value_quote = state.quote } };
+            return .ok;
         } else if (isValidChar(c)) {
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .attribute_value_ref_start => |state| if (isNameStartChar(c)) {
+            self.state = .{ .attribute_value_entity_ref_name = .{ .element_name = state.element_name, .name = state.name, .value_start = state.value_start, .value_quote = state.value_quote } };
+            return .ok;
+        } else if (c == '#') {
+            self.state = .{ .attribute_value_char_ref_start = .{ .element_name = state.element_name, .name = state.name, .value_start = state.value_start, .value_quote = state.value_quote } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .attribute_value_entity_ref_name => |state| if (isNameChar(c)) {
+            return .ok;
+        } else if (c == ';') {
+            self.state = .{ .attribute_value = .{ .element_name = state.element_name, .name = state.name, .start = state.value_start, .quote = state.value_quote } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .attribute_value_char_ref_start => |state| if (isDigitChar(c)) {
+            self.state = .{ .attribute_value_char_ref_decimal = .{ .element_name = state.element_name, .name = state.name, .value_start = state.value_start, .value_quote = state.value_quote } };
+            return .ok;
+        } else if (c == 'x') {
+            self.state = .{ .attribute_value_char_ref_hex = .{ .element_name = state.element_name, .name = state.name, .value_start = state.value_start, .value_quote = state.value_quote } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .attribute_value_char_ref_decimal => |state| if (isDigitChar(c)) {
+            return .ok;
+        } else if (c == ';') {
+            self.state = .{ .attribute_value = .{ .element_name = state.element_name, .name = state.name, .start = state.value_start, .quote = state.value_quote } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .attribute_value_char_ref_hex => |state| if (isHexDigitChar(c)) {
+            return .ok;
+        } else if (c == ';') {
+            self.state = .{ .attribute_value = .{ .element_name = state.element_name, .name = state.name, .start = state.value_start, .quote = state.value_quote } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -715,6 +789,9 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             } else {
                 return .{ .text = .{ .content = content } };
             }
+        } else if (self.depth > 0 and c == '&') {
+            self.state = .{ .content_ref_start = .{ .content_start = state.start } };
+            return .ok;
         } else if (self.depth > 0 and isValidChar(c)) {
             // Textual content is not allowed outside the root element.
             return .ok;
@@ -722,6 +799,53 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             // Spaces are allowed outside the root element. Another check in
             // this state will prevent a text token from being emitted at the
             // end of the whitespace.
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .content_ref_start => |state| if (isNameStartChar(c)) {
+            self.state = .{ .content_entity_ref_name = .{ .content_start = state.content_start } };
+            return .ok;
+        } else if (c == '#') {
+            self.state = .{ .content_char_ref_start = .{ .content_start = state.content_start } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .content_entity_ref_name => |state| if (isNameChar(c)) {
+            return .ok;
+        } else if (c == ';') {
+            self.state = .{ .content = .{ .start = state.content_start } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .content_char_ref_start => |state| if (isDigitChar(c)) {
+            self.state = .{ .content_char_ref_decimal = .{ .content_start = state.content_start } };
+            return .ok;
+        } else if (c == 'x') {
+            self.state = .{ .content_char_ref_hex = .{ .content_start = state.content_start } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .content_char_ref_decimal => |state| if (isDigitChar(c)) {
+            return .ok;
+        } else if (c == ';') {
+            self.state = .{ .content = .{ .start = state.content_start } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .content_char_ref_hex => |state| if (isHexDigitChar(c)) {
+            return .ok;
+        } else if (c == ';') {
+            self.state = .{ .content = .{ .start = state.content_start } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -748,6 +872,20 @@ inline fn isValidChar(c: u8) bool {
 inline fn isSpaceChar(c: u8) bool {
     return switch (c) {
         ' ', '\t', '\r', '\n' => true,
+        else => false,
+    };
+}
+
+inline fn isDigitChar(c: u8) bool {
+    return switch (c) {
+        '0'...'9' => true,
+        else => false,
+    };
+}
+
+inline fn isHexDigitChar(c: u8) bool {
+    return switch (c) {
+        '0'...'9', 'a'...'f', 'A'...'F' => true,
         else => false,
     };
 }
@@ -859,6 +997,17 @@ test "XML declaration" {
     });
 }
 
+test "references" {
+    try testValid(
+        \\<element attribute="Hello&#x2C;&#32;world &amp; friends!">&lt;Hi&#33;&#x21;&gt;</element>
+    , &.{
+        .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
+        .{ .attribute = .{ .name = .{ .start = 9, .end = 18 }, .value = .{ .start = 20, .end = 56 } } },
+        .{ .text = .{ .content = .{ .start = 58, .end = 79 } } },
+        .{ .element_end = .{ .name = .{ .start = 81, .end = 88 } } },
+    });
+}
+
 test "complex document" {
     try testValid(
         \\<?xml version="1.0"?>
@@ -923,6 +1072,19 @@ test "invalid XML declaration" {
     // try testInvalid("<?xml?>", 5);
     try testInvalid("<? xml version='1.0' ?>", 2);
     try testInvalid("<?xml version='1.0' standalone='yes' encoding='UTF-8'?>", 37);
+}
+
+test "invalid references" {
+    try testInvalid("<element>&</element>", 10);
+    try testInvalid("<element>&amp</element>", 13);
+    try testInvalid("<element>&#ABC;</element>", 11);
+    try testInvalid("<element>&#12C;</element>", 13);
+    try testInvalid("<element>&#xxx;</element>", 12);
+    try testInvalid("<element attr='&' />", 16);
+    try testInvalid("<element attr='&amp' />", 19);
+    try testInvalid("<element attr='&#ABC' />", 17);
+    try testInvalid("<element attr='&#12C' />", 19);
+    try testInvalid("<element attr='&#xxx' />", 18);
 }
 
 test "missing root element" {
