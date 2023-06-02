@@ -66,6 +66,10 @@ pub const Range = struct {
     pub fn isEmpty(self: Range) bool {
         return self.start == self.end;
     }
+
+    pub fn format(self: Range, _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        try writer.print("{}..{}", .{ self.start, self.end });
+    }
 };
 
 /// A bit of content of an element or attribute.
