@@ -68,6 +68,18 @@ pub const Range = struct {
     }
 };
 
+/// A bit of content of an element or attribute.
+pub const Content = union(enum) {
+    /// Raw text content (does not contain any entities).
+    text: Range,
+    /// An entity reference, such as `&amp;`. The range covers the name (`amp`).
+    entity_ref: Range,
+    /// A decimal character reference, such as `&#32;`. The range covers the number (`32`).
+    char_ref_dec: Range,
+    /// A hexadecimal character reference, such as `&#x20`. The range covers the number (`20`).
+    char_ref_hex: Range,
+};
+
 /// A single XML token.
 ///
 /// The choice of tokens is designed to allow the buffer position to be reset as
@@ -95,10 +107,7 @@ pub const Token = union(enum) {
     /// Element start tag.
     element_start: struct { name: Range },
     /// Element content.
-    ///
-    /// Also indicates whether the content is CDATA, since this affects
-    /// whether references should be expanded by a higher-level parser.
-    element_content: struct { content: Range, cdata: bool },
+    element_content: struct { content: Content },
     /// Element end tag.
     element_end: struct { name: Range },
     /// End of an empty element.
@@ -106,7 +115,7 @@ pub const Token = union(enum) {
     /// Attribute start.
     attribute_start: struct { name: Range },
     /// Attribute value content.
-    attribute_content: struct { content: Range },
+    attribute_content: struct { content: Content },
     /// Comment start.
     comment_start,
     /// Comment content.
@@ -224,17 +233,17 @@ const State = union(enum) {
     ///
     /// The `quote` field is intended to avoid duplication of states into
     /// single-quote and double-quote variants.
-    attribute_value: struct { start: usize, quote: u8 },
+    attribute_content: struct { start: usize, quote: u8 },
     /// Attribute value after encountering '&'.
-    attribute_value_ref_start: struct { value_start: usize, value_quote: u8 },
+    attribute_content_ref_start: struct { value_quote: u8 },
     /// Attribute value within an entity reference name.
-    attribute_value_entity_ref_name: struct { value_start: usize, value_quote: u8 },
+    attribute_content_entity_ref_name: struct { start: usize, value_quote: u8 },
     /// Attribute value after encountering '&#'.
-    attribute_value_char_ref_start: struct { value_start: usize, value_quote: u8 },
+    attribute_content_char_ref_start: struct { value_quote: u8 },
     /// Attribute value within a decimal character reference.
-    attribute_value_char_ref_decimal: struct { value_start: usize, value_quote: u8 },
+    attribute_content_char_ref_dec: struct { start: usize, value_quote: u8 },
     /// Attribute value within a hex character reference.
-    attribute_value_char_ref_hex: struct { value_start: usize, value_quote: u8 },
+    attribute_content_char_ref_hex: struct { start: usize, value_quote: u8 },
 
     /// Element end tag after consuming '</'.
     element_end,
@@ -246,15 +255,15 @@ const State = union(enum) {
     /// Element content (text).
     content: struct { start: usize },
     /// Element content after encountering '&'.
-    content_ref_start: struct { content_start: usize },
+    content_ref_start,
     /// Element content within an entity reference name.
-    content_entity_ref_name: struct { content_start: usize },
+    content_entity_ref_name: struct { start: usize },
     /// Element content after encountering '&#'.
-    content_char_ref_start: struct { content_start: usize },
+    content_char_ref_start,
     /// Element content within a decimal character reference.
-    content_char_ref_decimal: struct { content_start: usize },
+    content_char_ref_dec: struct { start: usize },
     /// Element content within a hex character reference.
-    content_char_ref_hex: struct { content_start: usize },
+    content_char_ref_hex: struct { start: usize },
 };
 
 /// Accepts a single byte of input, returning the token found or an error.
@@ -621,7 +630,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .cdata_maybe_end => |state| if (c == state.left[0]) {
             if (state.left.len == 1) {
                 self.state = .{ .content = .{ .start = self.pos + 1 } };
-                return .{ .element_content = .{ .content = .{ .start = state.content_start, .end = self.pos - "]]".len }, .cdata = true } };
+                return .{ .element_content = .{ .content = .{ .text = .{ .start = state.content_start, .end = self.pos - "]]".len } } } };
             } else {
                 self.state = .{ .cdata_maybe_end = .{ .content_start = state.content_start, .left = state.left[1..] } };
                 return .ok;
@@ -701,67 +710,77 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .attribute_after_equals => if (isSpaceChar(c)) {
             return .ok;
         } else if (c == '"' or c == '\'') {
-            self.state = .{ .attribute_value = .{ .start = self.pos + 1, .quote = c } };
+            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = c } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .attribute_value => |state| if (c == state.quote) {
+        .attribute_content => |state| if (c == state.quote) {
+            const range = Range{ .start = state.start, .end = self.pos };
             self.state = .element_start_after_name;
-            return .{ .attribute_content = .{ .content = .{ .start = state.start, .end = self.pos } } };
+            if (range.isEmpty()) {
+                return .ok;
+            } else {
+                return .{ .attribute_content = .{ .content = .{ .text = range } } };
+            }
         } else if (c == '&') {
-            self.state = .{ .attribute_value_ref_start = .{ .value_start = state.start, .value_quote = state.quote } };
-            return .ok;
+            const range = Range{ .start = state.start, .end = self.pos };
+            self.state = .{ .attribute_content_ref_start = .{ .value_quote = state.quote } };
+            if (range.isEmpty()) {
+                return .ok;
+            } else {
+                return .{ .attribute_content = .{ .content = .{ .text = range } } };
+            }
         } else if (isValidChar(c)) {
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .attribute_value_ref_start => |state| if (isNameStartChar(c)) {
-            self.state = .{ .attribute_value_entity_ref_name = .{ .value_start = state.value_start, .value_quote = state.value_quote } };
+        .attribute_content_ref_start => |state| if (isNameStartChar(c)) {
+            self.state = .{ .attribute_content_entity_ref_name = .{ .start = self.pos, .value_quote = state.value_quote } };
             return .ok;
         } else if (c == '#') {
-            self.state = .{ .attribute_value_char_ref_start = .{ .value_start = state.value_start, .value_quote = state.value_quote } };
+            self.state = .{ .attribute_content_char_ref_start = .{ .value_quote = state.value_quote } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .attribute_value_entity_ref_name => |state| if (isNameChar(c)) {
+        .attribute_content_entity_ref_name => |state| if (isNameChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .attribute_value = .{ .start = state.value_start, .quote = state.value_quote } };
-            return .ok;
+            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = state.value_quote } };
+            return .{ .attribute_content = .{ .content = .{ .entity_ref = .{ .start = state.start, .end = self.pos } } } };
         } else {
             return error.SyntaxError;
         },
 
-        .attribute_value_char_ref_start => |state| if (isDigitChar(c)) {
-            self.state = .{ .attribute_value_char_ref_decimal = .{ .value_start = state.value_start, .value_quote = state.value_quote } };
+        .attribute_content_char_ref_start => |state| if (isDigitChar(c)) {
+            self.state = .{ .attribute_content_char_ref_dec = .{ .start = self.pos, .value_quote = state.value_quote } };
             return .ok;
         } else if (c == 'x') {
-            self.state = .{ .attribute_value_char_ref_hex = .{ .value_start = state.value_start, .value_quote = state.value_quote } };
+            self.state = .{ .attribute_content_char_ref_hex = .{ .start = self.pos + 1, .value_quote = state.value_quote } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .attribute_value_char_ref_decimal => |state| if (isDigitChar(c)) {
+        .attribute_content_char_ref_dec => |state| if (isDigitChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .attribute_value = .{ .start = state.value_start, .quote = state.value_quote } };
-            return .ok;
+            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = state.value_quote } };
+            return .{ .attribute_content = .{ .content = .{ .char_ref_dec = .{ .start = state.start, .end = self.pos } } } };
         } else {
             return error.SyntaxError;
         },
 
-        .attribute_value_char_ref_hex => |state| if (isHexDigitChar(c)) {
+        .attribute_content_char_ref_hex => |state| if (isHexDigitChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .attribute_value = .{ .start = state.value_start, .quote = state.value_quote } };
-            return .ok;
+            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = state.value_quote } };
+            return .{ .attribute_content = .{ .content = .{ .char_ref_hex = .{ .start = state.start, .end = self.pos } } } };
         } else {
             return error.SyntaxError;
         },
@@ -804,19 +823,24 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
 
         .content => |state| if (c == '<') {
             self.state = .unknown_start;
-            const content = Range{ .start = state.start, .end = self.pos };
-            if (self.depth == 0 or content.isEmpty()) {
+            const range = Range{ .start = state.start, .end = self.pos };
+            if (self.depth == 0 or range.isEmpty()) {
                 // Do not report empty text content between elements, e.g.
                 // <e1></e1><e2></e2> (there is no text content between or
                 // within e1 and e2). Also do not report text content outside
                 // the root element (which will just be whitespace).
                 return .ok;
             } else {
-                return .{ .element_content = .{ .content = content, .cdata = false } };
+                return .{ .element_content = .{ .content = .{ .text = range } } };
             }
         } else if (self.depth > 0 and c == '&') {
-            self.state = .{ .content_ref_start = .{ .content_start = state.start } };
-            return .ok;
+            const range = Range{ .start = state.start, .end = self.pos };
+            self.state = .content_ref_start;
+            if (range.isEmpty()) {
+                return .ok;
+            } else {
+                return .{ .element_content = .{ .content = .{ .text = range } } };
+            }
         } else if (self.depth > 0 and isValidChar(c)) {
             // Textual content is not allowed outside the root element.
             return .ok;
@@ -829,11 +853,11 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .content_ref_start => |state| if (isNameStartChar(c)) {
-            self.state = .{ .content_entity_ref_name = .{ .content_start = state.content_start } };
+        .content_ref_start => if (isNameStartChar(c)) {
+            self.state = .{ .content_entity_ref_name = .{ .start = self.pos } };
             return .ok;
         } else if (c == '#') {
-            self.state = .{ .content_char_ref_start = .{ .content_start = state.content_start } };
+            self.state = .content_char_ref_start;
             return .ok;
         } else {
             return error.SyntaxError;
@@ -842,27 +866,27 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .content_entity_ref_name => |state| if (isNameChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .content = .{ .start = state.content_start } };
-            return .ok;
+            self.state = .{ .content = .{ .start = self.pos + 1 } };
+            return .{ .element_content = .{ .content = .{ .entity_ref = .{ .start = state.start, .end = self.pos } } } };
         } else {
             return error.SyntaxError;
         },
 
-        .content_char_ref_start => |state| if (isDigitChar(c)) {
-            self.state = .{ .content_char_ref_decimal = .{ .content_start = state.content_start } };
+        .content_char_ref_start => if (isDigitChar(c)) {
+            self.state = .{ .content_char_ref_dec = .{ .start = self.pos } };
             return .ok;
         } else if (c == 'x') {
-            self.state = .{ .content_char_ref_hex = .{ .content_start = state.content_start } };
+            self.state = .{ .content_char_ref_hex = .{ .start = self.pos + 1 } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .content_char_ref_decimal => |state| if (isDigitChar(c)) {
+        .content_char_ref_dec => |state| if (isDigitChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .content = .{ .start = state.content_start } };
-            return .ok;
+            self.state = .{ .content = .{ .start = self.pos + 1 } };
+            return .{ .element_content = .{ .content = .{ .char_ref_dec = .{ .start = state.start, .end = self.pos } } } };
         } else {
             return error.SyntaxError;
         },
@@ -870,8 +894,8 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .content_char_ref_hex => |state| if (isHexDigitChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .content = .{ .start = state.content_start } };
-            return .ok;
+            self.state = .{ .content = .{ .start = self.pos + 1 } };
+            return .{ .element_content = .{ .content = .{ .char_ref_hex = .{ .start = state.start, .end = self.pos } } } };
         } else {
             return error.SyntaxError;
         },
@@ -950,7 +974,7 @@ test "root element with no content" {
 test "element content" {
     try testValid("<message>Hello, world!</message>", &.{
         .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
-        .{ .element_content = .{ .content = .{ .start = 9, .end = 22 }, .cdata = false } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 9, .end = 22 } } } },
         .{ .element_end = .{ .name = .{ .start = 24, .end = 31 } } },
     });
 }
@@ -1028,8 +1052,17 @@ test "references" {
     , &.{
         .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
         .{ .attribute_start = .{ .name = .{ .start = 9, .end = 18 } } },
-        .{ .attribute_content = .{ .content = .{ .start = 20, .end = 56 } } },
-        .{ .element_content = .{ .content = .{ .start = 58, .end = 79 }, .cdata = false } },
+        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 20, .end = 25 } } } },
+        .{ .attribute_content = .{ .content = .{ .char_ref_hex = .{ .start = 28, .end = 30 } } } },
+        .{ .attribute_content = .{ .content = .{ .char_ref_dec = .{ .start = 33, .end = 35 } } } },
+        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 36, .end = 42 } } } },
+        .{ .attribute_content = .{ .content = .{ .entity_ref = .{ .start = 43, .end = 46 } } } },
+        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 47, .end = 56 } } } },
+        .{ .element_content = .{ .content = .{ .entity_ref = .{ .start = 59, .end = 61 } } } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 62, .end = 64 } } } },
+        .{ .element_content = .{ .content = .{ .char_ref_dec = .{ .start = 66, .end = 68 } } } },
+        .{ .element_content = .{ .content = .{ .char_ref_hex = .{ .start = 72, .end = 74 } } } },
+        .{ .element_content = .{ .content = .{ .entity_ref = .{ .start = 76, .end = 78 } } } },
         .{ .element_end = .{ .name = .{ .start = 81, .end = 88 } } },
     });
 }
@@ -1061,26 +1094,26 @@ test "complex document" {
         .{ .pi_start = .{ .target = .{ .start = 91, .end = 111 } } }, // some-pi-with-content
         .{ .pi_content = .{ .content = .{ .start = 112, .end = 119 } } },
         .{ .element_start = .{ .name = .{ .start = 123, .end = 127 } } }, // root
-        .{ .element_content = .{ .content = .{ .start = 128, .end = 131 }, .cdata = false } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 128, .end = 131 } } } },
         .{ .element_start = .{ .name = .{ .start = 132, .end = 133 } } }, // p
         .{ .attribute_start = .{ .name = .{ .start = 134, .end = 139 } } },
-        .{ .attribute_content = .{ .content = .{ .start = 141, .end = 145 } } },
-        .{ .element_content = .{ .content = .{ .start = 147, .end = 154 }, .cdata = false } },
-        .{ .element_content = .{ .content = .{ .start = 163, .end = 169 }, .cdata = true } },
+        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 141, .end = 145 } } } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 147, .end = 154 } } } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 163, .end = 169 } } } },
         .{ .element_end = .{ .name = .{ .start = 174, .end = 175 } } }, // /p
-        .{ .element_content = .{ .content = .{ .start = 176, .end = 179 }, .cdata = false } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 176, .end = 179 } } } },
         .{ .element_start = .{ .name = .{ .start = 180, .end = 184 } } }, // line
         .element_end_empty,
-        .{ .element_content = .{ .content = .{ .start = 187, .end = 190 }, .cdata = false } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 187, .end = 190 } } } },
         .{ .pi_start = .{ .target = .{ .start = 192, .end = 202 } } }, // another-pi
         .{ .pi_content = .{ .content = .{ .start = 202, .end = 202 } } },
-        .{ .element_content = .{ .content = .{ .start = 204, .end = 233 }, .cdata = false } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 204, .end = 233 } } } },
         .{ .element_start = .{ .name = .{ .start = 234, .end = 237 } } }, // div
         .{ .element_start = .{ .name = .{ .start = 239, .end = 240 } } }, // p
-        .{ .element_content = .{ .content = .{ .start = 241, .end = 246 }, .cdata = false } },
+        .{ .element_content = .{ .content = .{ .entity_ref = .{ .start = 242, .end = 245 } } } },
         .{ .element_end = .{ .name = .{ .start = 248, .end = 249 } } }, // /p
         .{ .element_end = .{ .name = .{ .start = 252, .end = 255 } } }, // /div
-        .{ .element_content = .{ .content = .{ .start = 256, .end = 257 }, .cdata = false } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 256, .end = 257 } } } },
         .{ .element_end = .{ .name = .{ .start = 259, .end = 263 } } }, // /root
         .comment_start,
         .{ .comment_content = .{ .content = .{ .start = 269, .end = 325 } } },
