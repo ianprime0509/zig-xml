@@ -207,14 +207,14 @@ const State = union(enum) {
     /// In PI content after target name.
     pi_content: struct { start: usize },
     /// Possible end of PI after '?'.
-    pi_maybe_end: struct { content_start: usize },
+    pi_maybe_end: struct { start: usize },
 
     /// A '<![' (and possibly some part of 'CDATA[' after it) has been encountered.
     cdata_before_start: struct { left: []const u8 },
     /// CDATA.
     cdata: struct { start: usize },
     /// In CDATA content after some part of ']]>'.
-    cdata_maybe_end: struct { content_start: usize, left: []const u8 },
+    cdata_maybe_end: struct { start: usize, left: []const u8 },
 
     /// Name of element start tag.
     element_start_name: struct { start: usize },
@@ -235,15 +235,15 @@ const State = union(enum) {
     /// single-quote and double-quote variants.
     attribute_content: struct { start: usize, quote: u8 },
     /// Attribute value after encountering '&'.
-    attribute_content_ref_start: struct { value_quote: u8 },
+    attribute_content_ref_start: struct { quote: u8 },
     /// Attribute value within an entity reference name.
-    attribute_content_entity_ref_name: struct { start: usize, value_quote: u8 },
+    attribute_content_entity_ref_name: struct { start: usize, quote: u8 },
     /// Attribute value after encountering '&#'.
-    attribute_content_char_ref_start: struct { value_quote: u8 },
+    attribute_content_char_ref_start: struct { quote: u8 },
     /// Attribute value within a decimal character reference.
-    attribute_content_char_ref_dec: struct { start: usize, value_quote: u8 },
+    attribute_content_char_ref_dec: struct { start: usize, quote: u8 },
     /// Attribute value within a hex character reference.
-    attribute_content_char_ref_hex: struct { start: usize, value_quote: u8 },
+    attribute_content_char_ref_hex: struct { start: usize, quote: u8 },
 
     /// Element end tag after consuming '</'.
     element_end,
@@ -316,7 +316,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             self.state = .pi_after_target;
             return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
         } else if (c == '?' and self.pos > state.start) {
-            self.state = .{ .pi_maybe_end = .{ .content_start = self.pos } };
+            self.state = .{ .pi_maybe_end = .{ .start = self.pos } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -570,7 +570,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             self.state = .pi_after_target;
             return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
         } else if (c == '?') {
-            self.state = .{ .pi_maybe_end = .{ .content_start = self.pos } };
+            self.state = .{ .pi_maybe_end = .{ .start = self.pos } };
             return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
         } else {
             return error.SyntaxError;
@@ -582,14 +582,14 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             self.state = .{ .pi_content = .{ .start = self.pos } };
             return .ok;
         } else if (c == '?') {
-            self.state = .{ .pi_maybe_end = .{ .content_start = self.pos } };
+            self.state = .{ .pi_maybe_end = .{ .start = self.pos } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
         .pi_content => |state| if (c == '?') {
-            self.state = .{ .pi_maybe_end = .{ .content_start = state.start } };
+            self.state = .{ .pi_maybe_end = .{ .start = state.start } };
             return .ok;
         } else if (isValidChar(c)) {
             return .ok;
@@ -599,9 +599,9 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
 
         .pi_maybe_end => |state| if (c == '>') {
             self.state = .{ .content = .{ .start = self.pos + 1 } };
-            return .{ .pi_content = .{ .content = .{ .start = state.content_start, .end = self.pos - 1 } } };
+            return .{ .pi_content = .{ .content = .{ .start = state.start, .end = self.pos - 1 } } };
         } else if (isValidChar(c)) {
-            self.state = .{ .pi_content = .{ .start = state.content_start } };
+            self.state = .{ .pi_content = .{ .start = state.start } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -619,7 +619,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .cdata => |state| if (c == ']') {
-            self.state = .{ .cdata_maybe_end = .{ .content_start = state.start, .left = "]>" } };
+            self.state = .{ .cdata_maybe_end = .{ .start = state.start, .left = "]>" } };
             return .ok;
         } else if (isValidChar(c)) {
             return .ok;
@@ -630,13 +630,13 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .cdata_maybe_end => |state| if (c == state.left[0]) {
             if (state.left.len == 1) {
                 self.state = .{ .content = .{ .start = self.pos + 1 } };
-                return .{ .element_content = .{ .content = .{ .text = .{ .start = state.content_start, .end = self.pos - "]]".len } } } };
+                return .{ .element_content = .{ .content = .{ .text = .{ .start = state.start, .end = self.pos - "]]".len } } } };
             } else {
-                self.state = .{ .cdata_maybe_end = .{ .content_start = state.content_start, .left = state.left[1..] } };
+                self.state = .{ .cdata_maybe_end = .{ .start = state.start, .left = state.left[1..] } };
                 return .ok;
             }
         } else if (isValidChar(c)) {
-            self.state = .{ .cdata = .{ .start = state.content_start } };
+            self.state = .{ .cdata = .{ .start = state.start } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -726,7 +726,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             }
         } else if (c == '&') {
             const range = Range{ .start = state.start, .end = self.pos };
-            self.state = .{ .attribute_content_ref_start = .{ .value_quote = state.quote } };
+            self.state = .{ .attribute_content_ref_start = .{ .quote = state.quote } };
             if (range.isEmpty()) {
                 return .ok;
             } else {
@@ -739,10 +739,10 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .attribute_content_ref_start => |state| if (isNameStartChar(c)) {
-            self.state = .{ .attribute_content_entity_ref_name = .{ .start = self.pos, .value_quote = state.value_quote } };
+            self.state = .{ .attribute_content_entity_ref_name = .{ .start = self.pos, .quote = state.quote } };
             return .ok;
         } else if (c == '#') {
-            self.state = .{ .attribute_content_char_ref_start = .{ .value_quote = state.value_quote } };
+            self.state = .{ .attribute_content_char_ref_start = .{ .quote = state.quote } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -751,17 +751,17 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .attribute_content_entity_ref_name => |state| if (isNameChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = state.value_quote } };
+            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = state.quote } };
             return .{ .attribute_content = .{ .content = .{ .entity_ref = .{ .start = state.start, .end = self.pos } } } };
         } else {
             return error.SyntaxError;
         },
 
         .attribute_content_char_ref_start => |state| if (isDigitChar(c)) {
-            self.state = .{ .attribute_content_char_ref_dec = .{ .start = self.pos, .value_quote = state.value_quote } };
+            self.state = .{ .attribute_content_char_ref_dec = .{ .start = self.pos, .quote = state.quote } };
             return .ok;
         } else if (c == 'x') {
-            self.state = .{ .attribute_content_char_ref_hex = .{ .start = self.pos + 1, .value_quote = state.value_quote } };
+            self.state = .{ .attribute_content_char_ref_hex = .{ .start = self.pos + 1, .quote = state.quote } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -770,7 +770,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .attribute_content_char_ref_dec => |state| if (isDigitChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = state.value_quote } };
+            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = state.quote } };
             return .{ .attribute_content = .{ .content = .{ .char_ref_dec = .{ .start = state.start, .end = self.pos } } } };
         } else {
             return error.SyntaxError;
@@ -779,7 +779,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .attribute_content_char_ref_hex => |state| if (isHexDigitChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = state.value_quote } };
+            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = state.quote } };
             return .{ .attribute_content = .{ .content = .{ .char_ref_hex = .{ .start = state.start, .end = self.pos } } } };
         } else {
             return error.SyntaxError;
@@ -1205,4 +1205,179 @@ fn testIncomplete(input: []const u8) !void {
         _ = try scanner.next(c);
     }
     try testing.expectError(error.UnexpectedEndOfInput, scanner.endInput());
+}
+
+/// Attempts to reset the `pos` of the scanner to 0.
+///
+/// This may require a token to be emitted with range information which will be
+/// lost after resetting `pos`: for example, calling this function in the
+/// middle of text content (of an element, attribute, etc.) will return a token
+/// consisting of the text content encountered so far. This token will use a
+/// range corresponding to `pos` _before the reset_, so the buffer backing the
+/// underlying data cannot be cleared until the token is processed. If no token
+/// needs to be emitted, `Token.ok` is returned.
+pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
+    const token: Token = switch (self.state) {
+        // States which contain no positional information can be reset at any
+        // time with no additional token
+        .start,
+
+        .unknown_document_start,
+
+        .xml_decl,
+        .xml_decl_version_name,
+        .xml_decl_after_version_name,
+        .xml_decl_after_version_equals,
+        .xml_decl_after_standalone,
+        .xml_decl_end,
+        .start_after_xml_decl,
+
+        .unknown_start,
+        .unknown_start_bang,
+
+        .comment_before_start,
+        .comment_before_end,
+
+        .pi,
+        .pi_after_target,
+
+        .cdata_before_start,
+
+        .element_start_after_name,
+        .element_start_empty,
+
+        .attribute_after_name,
+        .attribute_after_equals,
+        .attribute_content_ref_start,
+        .attribute_content_char_ref_start,
+
+        .element_end,
+        .element_end_after_name,
+
+        .content_ref_start,
+        .content_char_ref_start,
+        => .ok,
+
+        // States which contain positional information but cannot immediately
+        // be emitted as a token cannot be reset
+        .pi_or_xml_decl_start,
+
+        .xml_decl_version_value,
+        .xml_decl_after_version,
+        .xml_decl_encoding_name,
+        .xml_decl_after_encoding_name,
+        .xml_decl_after_encoding_equals,
+        .xml_decl_encoding_value,
+        .xml_decl_after_encoding,
+        .xml_decl_standalone_name,
+        .xml_decl_after_standalone_name,
+        .xml_decl_after_standalone_equals,
+        .xml_decl_standalone_value,
+
+        .pi_target,
+
+        .element_start_name,
+
+        .attribute_name,
+        .attribute_content_entity_ref_name,
+        .attribute_content_char_ref_dec,
+        .attribute_content_char_ref_hex,
+
+        .element_end_name,
+
+        .content_entity_ref_name,
+        .content_char_ref_dec,
+        .content_char_ref_hex,
+        => return error.CannotReset,
+
+        // Some states (specifically, content states) can be reset by emitting
+        // a token with the content seen so far
+        inline .comment, .comment_maybe_before_end => |*state| token: {
+            const range = Range{ .start = state.start, .end = self.pos };
+            state.start = 0;
+            if (range.isEmpty()) {
+                break :token .ok;
+            } else {
+                break :token .{ .comment_content = .{ .content = range } };
+            }
+        },
+
+        inline .pi_content, .pi_maybe_end => |*state| token: {
+            const range = Range{ .start = state.start, .end = self.pos };
+            state.start = 0;
+            if (range.isEmpty()) {
+                break :token .ok;
+            } else {
+                break :token .{ .pi_content = .{ .content = range } };
+            }
+        },
+
+        inline .cdata, .cdata_maybe_end => |*state| token: {
+            const range = Range{ .start = state.start, .end = self.pos };
+            state.start = 0;
+            if (range.isEmpty()) {
+                break :token .ok;
+            } else {
+                break :token .{ .element_content = .{ .content = .{ .text = range } } };
+            }
+        },
+
+        .attribute_content => |*state| token: {
+            const range = Range{ .start = state.start, .end = self.pos };
+            state.start = 0;
+            if (range.isEmpty()) {
+                break :token .ok;
+            } else {
+                break :token .{ .attribute_content = .{ .content = .{ .text = range } } };
+            }
+        },
+
+        .content => |*state| token: {
+            const range = Range{ .start = state.start, .end = self.pos };
+            state.start = 0;
+            if (range.isEmpty()) {
+                break :token .ok;
+            } else {
+                break :token .{ .element_content = .{ .content = .{ .text = range } } };
+            }
+        },
+    };
+    self.pos = 0;
+    return token;
+}
+
+test "resetPos inside element content" {
+    var scanner = Scanner{};
+    var tokens = std.ArrayListUnmanaged(Token){};
+    defer tokens.deinit(testing.allocator);
+
+    for ("<element>Hello,") |c| {
+        switch (try scanner.next(c)) {
+            .ok => {},
+            else => |token| try tokens.append(testing.allocator, token),
+        }
+    }
+    try tokens.append(testing.allocator, try scanner.resetPos());
+    for (" world!</element>") |c| {
+        switch (try scanner.next(c)) {
+            .ok => {},
+            else => |token| try tokens.append(testing.allocator, token),
+        }
+    }
+
+    try testing.expectEqualSlices(Token, &.{
+        .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 9, .end = 15 } } } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 0, .end = 7 } } } },
+        .{ .element_end = .{ .name = .{ .start = 9, .end = 16 } } },
+    }, tokens.items);
+}
+
+test "resetPos inside element reference name" {
+    var scanner = Scanner{};
+
+    for ("<element>Hello, world &am") |c| {
+        _ = try scanner.next(c);
+    }
+    try testing.expectError(error.CannotReset, scanner.resetPos());
 }
