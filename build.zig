@@ -43,4 +43,21 @@ pub fn build(b: *std.Build) void {
 
     const run_scan_step = b.step("run-example-scan", "Run scan example");
     run_scan_step.dependOn(&run_scan_exe.step);
+
+    const read_exe = b.addExecutable(.{
+        .name = "read",
+        .root_source_file = .{ .path = "examples/read.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    read_exe.addModule("xml", module);
+    install_examples_step.dependOn(&b.addInstallArtifact(read_exe).step);
+
+    const run_read_exe = b.addRunArtifact(read_exe);
+    if (b.args) |args| {
+        run_read_exe.addArgs(args);
+    }
+
+    const run_read_step = b.step("run-example-read", "Run read example");
+    run_read_step.dependOn(&run_read_exe.step);
 }
