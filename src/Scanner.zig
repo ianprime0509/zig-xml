@@ -72,18 +72,6 @@ pub const Range = struct {
     }
 };
 
-/// A bit of content of an element or attribute.
-pub const Content = union(enum) {
-    /// Raw text content (does not contain any entities).
-    text: Range,
-    /// An entity reference, such as `&amp;`. The range covers the name (`amp`).
-    entity_ref: Range,
-    /// A decimal character reference, such as `&#32;`. The range covers the number (`32`).
-    char_ref_dec: Range,
-    /// A hexadecimal character reference, such as `&#x20`. The range covers the number (`20`).
-    char_ref_hex: Range,
-};
-
 /// A single XML token.
 ///
 /// The choice of tokens is designed to allow the buffer position to be reset as
@@ -98,36 +86,84 @@ pub const Content = union(enum) {
 ///   (e.g. element or attribute) if the buffer is reset in the middle of
 ///   content or there are other necessary intervening factors, such as CDATA
 ///   in the middle of normal (non-CDATA) element content.
-///
-/// Note also that there are no explicit `end` tokens except for elements,
-/// since other constructs cannot nest, so the structure is never unclear (and
-/// because otherwise the `next` function would sometimes need to return more
-/// than one token, which it can't).
 pub const Token = union(enum) {
     /// Continue processing: no new token to report yet.
     ok,
     /// XML declaration.
-    xml_declaration: struct { version: Range, encoding: ?Range = null, standalone: ?Range = null },
+    xml_declaration: XmlDeclaration,
     /// Element start tag.
-    element_start: struct { name: Range },
+    element_start: ElementStart,
     /// Element content.
-    element_content: struct { content: Content },
+    element_content: ElementContent,
     /// Element end tag.
-    element_end: struct { name: Range },
+    element_end: ElementEnd,
     /// End of an empty element.
     element_end_empty,
     /// Attribute start.
-    attribute_start: struct { name: Range },
+    attribute_start: AttributeStart,
     /// Attribute value content.
-    attribute_content: struct { content: Content },
+    attribute_content: AttributeContent,
     /// Comment start.
     comment_start,
     /// Comment content.
-    comment_content: struct { content: Range },
+    comment_content: CommentContent,
     /// Processing instruction (PI) start.
-    pi_start: struct { target: Range },
+    pi_start: PiStart,
     /// PI content.
-    pi_content: struct { content: Range },
+    pi_content: PiContent,
+
+    pub const XmlDeclaration = struct {
+        version: Range,
+        encoding: ?Range = null,
+        standalone: ?Range = null,
+    };
+
+    pub const ElementStart = struct {
+        name: Range,
+    };
+
+    pub const ElementContent = struct {
+        content: Content,
+    };
+
+    pub const ElementEnd = struct {
+        name: Range,
+    };
+
+    pub const AttributeStart = struct {
+        name: Range,
+    };
+
+    pub const AttributeContent = struct {
+        content: Content,
+        final: bool = false,
+    };
+
+    pub const CommentContent = struct {
+        content: Range,
+        final: bool = false,
+    };
+
+    pub const PiStart = struct {
+        target: Range,
+    };
+
+    pub const PiContent = struct {
+        content: Range,
+        final: bool = false,
+    };
+
+    /// A bit of content of an element or attribute.
+    pub const Content = union(enum) {
+        /// Raw text content (does not contain any entities).
+        text: Range,
+        /// An entity reference, such as `&amp;`. The range covers the name (`amp`).
+        entity_ref: Range,
+        /// A decimal character reference, such as `&#32;`. The range covers the number (`32`).
+        char_ref_dec: Range,
+        /// A hexadecimal character reference, such as `&#x20`. The range covers the number (`20`).
+        char_ref_hex: Range,
+    };
 };
 
 /// The possible states of the parser.
@@ -555,13 +591,8 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .comment_maybe_before_end => |state| if (c == '-') {
-            const range = Range{ .start = state.start, .end = self.pos - 1 };
             self.state = .comment_before_end;
-            if (range.isEmpty()) {
-                return .ok;
-            } else {
-                return .{ .comment_content = .{ .content = .{ .start = state.start, .end = self.pos - 1 } } };
-            }
+            return .{ .comment_content = .{ .content = .{ .start = state.start, .end = self.pos - 1 }, .final = true } };
         } else if (isValidChar(c)) {
             self.state = .{ .comment = .{ .start = state.start } };
             return .ok;
@@ -617,13 +648,8 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .pi_maybe_end => |state| if (c == '>') {
-            const range = Range{ .start = state.start, .end = self.pos - 1 };
             self.state = .{ .content = .{ .start = self.pos + 1 } };
-            if (range.isEmpty()) {
-                return .ok;
-            } else {
-                return .{ .pi_content = .{ .content = range } };
-            }
+            return .{ .pi_content = .{ .content = .{ .start = state.start, .end = self.pos - 1 }, .final = true } };
         } else if (isValidChar(c)) {
             self.state = .{ .pi_content = .{ .start = state.start } };
             return .ok;
@@ -741,17 +767,13 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .attribute_content => |state| if (c == state.quote) {
-            const range = Range{ .start = state.start, .end = self.pos };
             self.state = .element_start_after_name;
-            if (range.isEmpty()) {
-                return .ok;
-            } else {
-                return .{ .attribute_content = .{ .content = .{ .text = range } } };
-            }
+            return .{ .attribute_content = .{ .content = .{ .text = .{ .start = state.start, .end = self.pos } }, .final = true } };
         } else if (c == '&') {
             const range = Range{ .start = state.start, .end = self.pos };
             self.state = .{ .attribute_content_ref_start = .{ .quote = state.quote } };
             if (range.isEmpty()) {
+                // We do not want to emit an empty text content token between entities
                 return .ok;
             } else {
                 return .{ .attribute_content = .{ .content = .{ .text = range } } };
@@ -1083,7 +1105,7 @@ test "references" {
         .{ .attribute_content = .{ .content = .{ .char_ref_dec = .{ .start = 33, .end = 35 } } } },
         .{ .attribute_content = .{ .content = .{ .text = .{ .start = 36, .end = 42 } } } },
         .{ .attribute_content = .{ .content = .{ .entity_ref = .{ .start = 43, .end = 46 } } } },
-        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 47, .end = 56 } } } },
+        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 47, .end = 56 } }, .final = true } },
         .{ .element_content = .{ .content = .{ .entity_ref = .{ .start = 59, .end = 61 } } } },
         .{ .element_content = .{ .content = .{ .text = .{ .start = 62, .end = 64 } } } },
         .{ .element_content = .{ .content = .{ .char_ref_dec = .{ .start = 66, .end = 68 } } } },
@@ -1114,15 +1136,16 @@ test "complex document" {
     , &.{
         .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 } } },
         .{ .pi_start = .{ .target = .{ .start = 24, .end = 31 } } }, // some-pi
+        .{ .pi_content = .{ .content = .{ .start = 31, .end = 31 }, .final = true } },
         .comment_start,
-        .{ .comment_content = .{ .content = .{ .start = 38, .end = 85 } } },
+        .{ .comment_content = .{ .content = .{ .start = 38, .end = 85 }, .final = true } },
         .{ .pi_start = .{ .target = .{ .start = 91, .end = 111 } } }, // some-pi-with-content
-        .{ .pi_content = .{ .content = .{ .start = 112, .end = 119 } } },
+        .{ .pi_content = .{ .content = .{ .start = 112, .end = 119 }, .final = true } },
         .{ .element_start = .{ .name = .{ .start = 123, .end = 127 } } }, // root
         .{ .element_content = .{ .content = .{ .text = .{ .start = 128, .end = 131 } } } },
         .{ .element_start = .{ .name = .{ .start = 132, .end = 133 } } }, // p
         .{ .attribute_start = .{ .name = .{ .start = 134, .end = 139 } } },
-        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 141, .end = 145 } } } },
+        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 141, .end = 145 } }, .final = true } },
         .{ .element_content = .{ .content = .{ .text = .{ .start = 147, .end = 154 } } } },
         .{ .element_content = .{ .content = .{ .text = .{ .start = 163, .end = 169 } } } },
         .{ .element_end = .{ .name = .{ .start = 174, .end = 175 } } }, // /p
@@ -1131,6 +1154,7 @@ test "complex document" {
         .element_end_empty,
         .{ .element_content = .{ .content = .{ .text = .{ .start = 187, .end = 190 } } } },
         .{ .pi_start = .{ .target = .{ .start = 192, .end = 202 } } }, // another-pi
+        .{ .pi_content = .{ .content = .{ .start = 202, .end = 202 }, .final = true } },
         .{ .element_content = .{ .content = .{ .text = .{ .start = 204, .end = 233 } } } },
         .{ .element_start = .{ .name = .{ .start = 234, .end = 237 } } }, // div
         .{ .element_start = .{ .name = .{ .start = 239, .end = 240 } } }, // p
@@ -1140,9 +1164,9 @@ test "complex document" {
         .{ .element_content = .{ .content = .{ .text = .{ .start = 256, .end = 257 } } } },
         .{ .element_end = .{ .name = .{ .start = 259, .end = 263 } } }, // /root
         .comment_start,
-        .{ .comment_content = .{ .content = .{ .start = 269, .end = 325 } } },
+        .{ .comment_content = .{ .content = .{ .start = 269, .end = 325 }, .final = true } },
         .{ .pi_start = .{ .target = .{ .start = 332, .end = 339 } } }, // comment
-        .{ .pi_content = .{ .content = .{ .start = 340, .end = 351 } } },
+        .{ .pi_content = .{ .content = .{ .start = 340, .end = 351 }, .final = true } },
     });
 }
 
