@@ -268,11 +268,21 @@ const State = union(enum) {
     content_char_ref_dec: struct { start: usize },
     /// Element content within a hex character reference.
     content_char_ref_hex: struct { start: usize },
+
+    /// A syntax error has been encountered.
+    ///
+    /// This is for safety, since the parser has no error recovery: to avoid
+    /// invalid tokens being emitted, the parser is put in this state after any
+    /// syntax error, and will always emit a syntax error in this state.
+    @"error",
 };
 
 /// Accepts a single byte of input, returning the token found or an error.
 pub inline fn next(self: *Scanner, c: u8) error{SyntaxError}!Token {
-    const token = try self.nextNoAdvance(c);
+    const token = self.nextNoAdvance(c) catch |e| {
+        self.state = .@"error";
+        return e;
+    };
     self.pos += 1;
     return token;
 }
@@ -545,8 +555,13 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .comment_maybe_before_end => |state| if (c == '-') {
+            const range = Range{ .start = state.start, .end = self.pos - 1 };
             self.state = .comment_before_end;
-            return .{ .comment_content = .{ .content = .{ .start = state.start, .end = self.pos - 1 } } };
+            if (range.isEmpty()) {
+                return .ok;
+            } else {
+                return .{ .comment_content = .{ .content = .{ .start = state.start, .end = self.pos - 1 } } };
+            }
         } else if (isValidChar(c)) {
             self.state = .{ .comment = .{ .start = state.start } };
             return .ok;
@@ -602,8 +617,13 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .pi_maybe_end => |state| if (c == '>') {
+            const range = Range{ .start = state.start, .end = self.pos - 1 };
             self.state = .{ .content = .{ .start = self.pos + 1 } };
-            return .{ .pi_content = .{ .content = .{ .start = state.start, .end = self.pos - 1 } } };
+            if (range.isEmpty()) {
+                return .ok;
+            } else {
+                return .{ .pi_content = .{ .content = range } };
+            }
         } else if (isValidChar(c)) {
             self.state = .{ .pi_content = .{ .start = state.start } };
             return .ok;
@@ -903,6 +923,8 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         } else {
             return error.SyntaxError;
         },
+
+        .@"error" => return error.SyntaxError,
     }
 }
 
@@ -1092,7 +1114,6 @@ test "complex document" {
     , &.{
         .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 } } },
         .{ .pi_start = .{ .target = .{ .start = 24, .end = 31 } } }, // some-pi
-        .{ .pi_content = .{ .content = .{ .start = 31, .end = 31 } } },
         .comment_start,
         .{ .comment_content = .{ .content = .{ .start = 38, .end = 85 } } },
         .{ .pi_start = .{ .target = .{ .start = 91, .end = 111 } } }, // some-pi-with-content
@@ -1110,7 +1131,6 @@ test "complex document" {
         .element_end_empty,
         .{ .element_content = .{ .content = .{ .text = .{ .start = 187, .end = 190 } } } },
         .{ .pi_start = .{ .target = .{ .start = 192, .end = 202 } } }, // another-pi
-        .{ .pi_content = .{ .content = .{ .start = 202, .end = 202 } } },
         .{ .element_content = .{ .content = .{ .text = .{ .start = 204, .end = 233 } } } },
         .{ .element_start = .{ .name = .{ .start = 234, .end = 237 } } }, // div
         .{ .element_start = .{ .name = .{ .start = 239, .end = 240 } } }, // p
@@ -1260,6 +1280,8 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
 
         .content_ref_start,
         .content_char_ref_start,
+
+        .@"error",
         => .ok,
 
         // States which contain positional information but cannot immediately
@@ -1278,7 +1300,16 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
         .xml_decl_after_standalone_equals,
         .xml_decl_standalone_value,
 
+        // None of the "maybe_end" states can be reset because we don't know if
+        // the resulting content token should include the possible ending
+        // characters until we read further to unambiguously determine whether
+        // the state is ending.
+        .comment_maybe_before_end,
+
         .pi_target,
+        .pi_maybe_end,
+
+        .cdata_maybe_end,
 
         .element_start_name,
 
@@ -1296,7 +1327,7 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
 
         // Some states (specifically, content states) can be reset by emitting
         // a token with the content seen so far
-        inline .comment, .comment_maybe_before_end => |*state| token: {
+        .comment => |*state| token: {
             const range = Range{ .start = state.start, .end = self.pos };
             state.start = 0;
             if (range.isEmpty()) {
@@ -1306,7 +1337,7 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
             }
         },
 
-        inline .pi_content, .pi_maybe_end => |*state| token: {
+        .pi_content => |*state| token: {
             const range = Range{ .start = state.start, .end = self.pos };
             state.start = 0;
             if (range.isEmpty()) {
@@ -1316,7 +1347,7 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
             }
         },
 
-        inline .cdata, .cdata_maybe_end => |*state| token: {
+        .cdata => |*state| token: {
             const range = Range{ .start = state.start, .end = self.pos };
             state.start = 0;
             if (range.isEmpty()) {
