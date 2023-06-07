@@ -159,10 +159,8 @@ pub const Token = union(enum) {
         text: Range,
         /// An entity reference, such as `&amp;`. The range covers the name (`amp`).
         entity_ref: Range,
-        /// A decimal character reference, such as `&#32;`. The range covers the number (`32`).
-        char_ref_dec: Range,
-        /// A hexadecimal character reference, such as `&#x20`. The range covers the number (`20`).
-        char_ref_hex: Range,
+        /// A character reference, such as `&#32` or `&#x20`. The value is a Unicode codepoint.
+        char_ref: u21,
     };
 };
 
@@ -288,10 +286,8 @@ const State = union(enum) {
     attribute_content_entity_ref_name: struct { start: usize, quote: u8 },
     /// Attribute value after encountering '&#'.
     attribute_content_char_ref_start: struct { quote: u8 },
-    /// Attribute value within a decimal character reference.
-    attribute_content_char_ref_dec: struct { start: usize, quote: u8 },
-    /// Attribute value within a hex character reference.
-    attribute_content_char_ref_hex: struct { start: usize, quote: u8 },
+    /// Attribute value within a character reference.
+    attribute_content_char_ref: struct { hex: bool, value: u21, quote: u8 },
 
     /// Element end tag after consuming '</'.
     element_end,
@@ -308,10 +304,8 @@ const State = union(enum) {
     content_entity_ref_name: struct { start: usize },
     /// Element content after encountering '&#'.
     content_char_ref_start,
-    /// Element content within a decimal character reference.
-    content_char_ref_dec: struct { start: usize },
-    /// Element content within a hex character reference.
-    content_char_ref_hex: struct { start: usize },
+    /// Element content within a character reference.
+    content_char_ref: struct { hex: bool, value: u21 },
 
     /// A syntax error has been encountered.
     ///
@@ -849,29 +843,34 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .attribute_content_char_ref_start => |state| if (isDigitChar(c)) {
-            self.state = .{ .attribute_content_char_ref_dec = .{ .start = self.pos, .quote = state.quote } };
+            self.state = .{ .attribute_content_char_ref = .{ .hex = false, .value = digitCharValue(c), .quote = state.quote } };
             return .ok;
         } else if (c == 'x') {
-            self.state = .{ .attribute_content_char_ref_hex = .{ .start = self.pos + 1, .quote = state.quote } };
+            self.state = .{ .attribute_content_char_ref = .{ .hex = true, .value = 0, .quote = state.quote } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .attribute_content_char_ref_dec => |state| if (isDigitChar(c)) {
-            return .ok;
-        } else if (c == ';') {
+        .attribute_content_char_ref => |state| if (!state.hex and isDigitChar(c)) {
+            const value = 10 * @as(u32, state.value) + digitCharValue(c);
+            if (value > std.math.maxInt(u21)) {
+                return error.SyntaxError;
+            } else {
+                self.state = .{ .attribute_content_char_ref = .{ .hex = false, .value = @intCast(u21, value), .quote = state.quote } };
+                return .ok;
+            }
+        } else if (state.hex and isHexDigitChar(c)) {
+            const value = 16 * @as(u32, state.value) + hexDigitCharValue(c);
+            if (value > std.math.maxInt(u21)) {
+                return error.SyntaxError;
+            } else {
+                self.state = .{ .attribute_content_char_ref = .{ .hex = true, .value = @intCast(u21, value), .quote = state.quote } };
+                return .ok;
+            }
+        } else if (c == ';' and isValidCharCodepoint(state.value)) {
             self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = state.quote } };
-            return .{ .attribute_content = .{ .content = .{ .char_ref_dec = .{ .start = state.start, .end = self.pos } } } };
-        } else {
-            return error.SyntaxError;
-        },
-
-        .attribute_content_char_ref_hex => |state| if (isHexDigitChar(c)) {
-            return .ok;
-        } else if (c == ';') {
-            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = state.quote } };
-            return .{ .attribute_content = .{ .content = .{ .char_ref_hex = .{ .start = state.start, .end = self.pos } } } };
+            return .{ .attribute_content = .{ .content = .{ .char_ref = state.value } } };
         } else {
             return error.SyntaxError;
         },
@@ -964,29 +963,34 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .content_char_ref_start => if (isDigitChar(c)) {
-            self.state = .{ .content_char_ref_dec = .{ .start = self.pos } };
+            self.state = .{ .content_char_ref = .{ .hex = false, .value = digitCharValue(c) } };
             return .ok;
         } else if (c == 'x') {
-            self.state = .{ .content_char_ref_hex = .{ .start = self.pos + 1 } };
+            self.state = .{ .content_char_ref = .{ .hex = true, .value = 0 } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .content_char_ref_dec => |state| if (isDigitChar(c)) {
-            return .ok;
-        } else if (c == ';') {
+        .content_char_ref => |state| if (!state.hex and isDigitChar(c)) {
+            const value = 10 * @as(u32, state.value) + digitCharValue(c);
+            if (value > std.math.maxInt(u21)) {
+                return error.SyntaxError;
+            } else {
+                self.state = .{ .content_char_ref = .{ .hex = false, .value = @intCast(u21, value) } };
+                return .ok;
+            }
+        } else if (state.hex and isHexDigitChar(c)) {
+            const value = 16 * @as(u32, state.value) + hexDigitCharValue(c);
+            if (value > std.math.maxInt(u21)) {
+                return error.SyntaxError;
+            } else {
+                self.state = .{ .content_char_ref = .{ .hex = true, .value = @intCast(u21, value) } };
+                return .ok;
+            }
+        } else if (c == ';' and isValidCharCodepoint(c)) {
             self.state = .{ .content = .{ .start = self.pos + 1 } };
-            return .{ .element_content = .{ .content = .{ .char_ref_dec = .{ .start = state.start, .end = self.pos } } } };
-        } else {
-            return error.SyntaxError;
-        },
-
-        .content_char_ref_hex => |state| if (isHexDigitChar(c)) {
-            return .ok;
-        } else if (c == ';') {
-            self.state = .{ .content = .{ .start = self.pos + 1 } };
-            return .{ .element_content = .{ .content = .{ .char_ref_hex = .{ .start = state.start, .end = self.pos } } } };
+            return .{ .element_content = .{ .content = .{ .char_ref = state.value } } };
         } else {
             return error.SyntaxError;
         },
@@ -1011,6 +1015,13 @@ inline fn isValidChar(c: u8) bool {
     };
 }
 
+inline fn isValidCharCodepoint(c: u21) bool {
+    return switch (c) {
+        '\t', '\r', '\n', ' '...0xD7FF, 0xE000...0xFFFD, 0x10000...0x10FFFF => true,
+        else => false,
+    };
+}
+
 inline fn isSpaceChar(c: u8) bool {
     return switch (c) {
         ' ', '\t', '\r', '\n' => true,
@@ -1025,10 +1036,22 @@ inline fn isDigitChar(c: u8) bool {
     };
 }
 
+inline fn digitCharValue(c: u8) u8 {
+    return c - '0';
+}
+
 inline fn isHexDigitChar(c: u8) bool {
     return switch (c) {
         '0'...'9', 'a'...'f', 'A'...'F' => true,
         else => false,
+    };
+}
+
+inline fn hexDigitCharValue(c: u8) u8 {
+    return switch (c) {
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => c - '0',
     };
 }
 
@@ -1208,15 +1231,15 @@ test "references" {
         .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
         .{ .attribute_start = .{ .name = .{ .start = 9, .end = 18 } } },
         .{ .attribute_content = .{ .content = .{ .text = .{ .start = 20, .end = 25 } } } },
-        .{ .attribute_content = .{ .content = .{ .char_ref_hex = .{ .start = 28, .end = 30 } } } },
-        .{ .attribute_content = .{ .content = .{ .char_ref_dec = .{ .start = 33, .end = 35 } } } },
+        .{ .attribute_content = .{ .content = .{ .char_ref = 0x2C } } },
+        .{ .attribute_content = .{ .content = .{ .char_ref = 32 } } },
         .{ .attribute_content = .{ .content = .{ .text = .{ .start = 36, .end = 42 } } } },
         .{ .attribute_content = .{ .content = .{ .entity_ref = .{ .start = 43, .end = 46 } } } },
         .{ .attribute_content = .{ .content = .{ .text = .{ .start = 47, .end = 56 } }, .final = true } },
         .{ .element_content = .{ .content = .{ .entity_ref = .{ .start = 59, .end = 61 } } } },
         .{ .element_content = .{ .content = .{ .text = .{ .start = 62, .end = 64 } } } },
-        .{ .element_content = .{ .content = .{ .char_ref_dec = .{ .start = 66, .end = 68 } } } },
-        .{ .element_content = .{ .content = .{ .char_ref_hex = .{ .start = 72, .end = 74 } } } },
+        .{ .element_content = .{ .content = .{ .char_ref = 33 } } },
+        .{ .element_content = .{ .content = .{ .char_ref = 0x21 } } },
         .{ .element_content = .{ .content = .{ .entity_ref = .{ .start = 76, .end = 78 } } } },
         .{ .element_end = .{ .name = .{ .start = 81, .end = 88 } } },
     });
@@ -1416,12 +1439,14 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
         .attribute_after_equals,
         .attribute_content_ref_start,
         .attribute_content_char_ref_start,
+        .attribute_content_char_ref,
 
         .element_end,
         .element_end_after_name,
 
         .content_ref_start,
         .content_char_ref_start,
+        .content_char_ref,
 
         .@"error",
         => .ok,
@@ -1459,14 +1484,10 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
 
         .attribute_name,
         .attribute_content_entity_ref_name,
-        .attribute_content_char_ref_dec,
-        .attribute_content_char_ref_hex,
 
         .element_end_name,
 
         .content_entity_ref_name,
-        .content_char_ref_dec,
-        .content_char_ref_hex,
         => return error.CannotReset,
 
         // Some states (specifically, content states) can be reset by emitting

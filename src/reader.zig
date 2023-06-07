@@ -299,14 +299,8 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type) type {
                     }
                     break :content .{ .entity_ref = name };
                 },
-                .char_ref_dec => |char_ref| .{ .char_ref = try parseCharRef(self.bufRange(char_ref), 10) },
-                .char_ref_hex => |char_ref| .{ .char_ref = try parseCharRef(self.bufRange(char_ref), 16) },
+                .char_ref => |char_ref| .{ .char_ref = char_ref },
             };
-        }
-
-        fn parseCharRef(ref: []const u8, base: u8) !u21 {
-            const codepoint = fmt.parseInt(u21, ref, base) catch return error.SyntaxError;
-            return if (unicode.utf8ValidCodepoint(codepoint)) codepoint else error.SyntaxError;
         }
 
         inline fn bufRange(self: *const Self, range: Scanner.Range) []const u8 {
