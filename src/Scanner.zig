@@ -115,7 +115,7 @@ pub const Token = union(enum) {
     pub const XmlDeclaration = struct {
         version: Range,
         encoding: ?Range = null,
-        standalone: ?Range = null,
+        standalone: ?bool = null,
     };
 
     pub const ElementStart = struct {
@@ -195,7 +195,9 @@ const State = union(enum) {
     xml_decl_after_version_name,
     /// XML declaration after '=' in version info.
     xml_decl_after_version_equals,
-    /// XML declaration version value.
+    /// XML version value with some part of '1.' consumed.
+    xml_decl_version_value_start: struct { start: usize, quote: u8, left: []const u8 },
+    /// XML declaration version value after '1.'.
     xml_decl_version_value: struct { start: usize, quote: u8 },
     /// XML declaration after version info.
     xml_decl_after_version: struct { version: Range },
@@ -205,7 +207,9 @@ const State = union(enum) {
     xml_decl_after_encoding_name: struct { version: Range },
     /// XML declaration after '=' in encoding declaration.
     xml_decl_after_encoding_equals: struct { version: Range },
-    /// XML declaration encoding declaration value.
+    /// XML declaration encoding declaration value start (after opening quote).
+    xml_decl_encoding_value_start: struct { version: Range, start: usize, quote: u8 },
+    /// XML declaration encoding declaration value (after first character).
     xml_decl_encoding_value: struct { version: Range, start: usize, quote: u8 },
     /// XML declaration after encoding declaration.
     xml_decl_after_encoding: struct { version: Range, encoding: ?Range },
@@ -215,8 +219,12 @@ const State = union(enum) {
     xml_decl_after_standalone_name: struct { version: Range, encoding: ?Range },
     /// XML declaration after '=' in standalone declaration.
     xml_decl_after_standalone_equals: struct { version: Range, encoding: ?Range },
-    /// XML declaration standalone declaration value.
-    xml_decl_standalone_value: struct { version: Range, encoding: ?Range, start: usize, quote: u8 },
+    /// XML declaration standalone declaration value start (after opening quote).
+    xml_decl_standalone_value_start: struct { version: Range, encoding: ?Range, quote: u8 },
+    /// XML declaration standalone declaration value after some part of 'yes' or 'no'.
+    xml_decl_standalone_value: struct { quote: u8, left: []const u8 },
+    /// XML declaration standalone declaration value after full 'yes' or 'no'.
+    xml_decl_standalone_value_end: struct { quote: u8 },
     /// XML declaration after standalone declaration.
     xml_decl_after_standalone,
     /// End of XML declaration after '?'.
@@ -404,16 +412,27 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .xml_decl_after_version_equals => if (isSpaceChar(c)) {
             return .ok;
         } else if (c == '"' or c == '\'') {
-            self.state = .{ .xml_decl_version_value = .{ .start = self.pos + 1, .quote = c } };
+            self.state = .{ .xml_decl_version_value_start = .{ .start = self.pos + 1, .quote = c, .left = "1." } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_version_value => |state| if (c == state.quote) {
+        .xml_decl_version_value_start => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .{ .xml_decl_version_value = .{ .start = state.start, .quote = state.quote } };
+            } else {
+                self.state = .{ .xml_decl_version_value_start = .{ .start = state.start, .quote = state.quote, .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .xml_decl_version_value => |state| if (c == state.quote and self.pos > state.start + "1.".len) {
             self.state = .{ .xml_decl_after_version = .{ .version = .{ .start = state.start, .end = self.pos } } };
             return .ok;
-        } else if (isValidChar(c)) {
+        } else if (isDigitChar(c)) {
             return .ok;
         } else {
             return error.SyntaxError;
@@ -457,7 +476,14 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .xml_decl_after_encoding_equals => |state| if (isSpaceChar(c)) {
             return .ok;
         } else if (c == '"' or c == '\'') {
-            self.state = .{ .xml_decl_encoding_value = .{ .version = state.version, .start = self.pos + 1, .quote = c } };
+            self.state = .{ .xml_decl_encoding_value_start = .{ .version = state.version, .start = self.pos + 1, .quote = c } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .xml_decl_encoding_value_start => |state| if (isEncodingStartChar(c)) {
+            self.state = .{ .xml_decl_encoding_value = .{ .version = state.version, .start = state.start, .quote = state.quote } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -466,7 +492,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .xml_decl_encoding_value => |state| if (c == state.quote) {
             self.state = .{ .xml_decl_after_encoding = .{ .version = state.version, .encoding = .{ .start = state.start, .end = self.pos } } };
             return .ok;
-        } else if (isValidChar(c)) {
+        } else if (isEncodingChar(c)) {
             return .ok;
         } else {
             return error.SyntaxError;
@@ -507,16 +533,35 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .xml_decl_after_standalone_equals => |state| if (isSpaceChar(c)) {
             return .ok;
         } else if (c == '"' or c == '\'') {
-            self.state = .{ .xml_decl_standalone_value = .{ .version = state.version, .encoding = state.encoding, .start = self.pos + 1, .quote = c } };
+            self.state = .{ .xml_decl_standalone_value_start = .{ .version = state.version, .encoding = state.encoding, .quote = c } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_standalone_value => |state| if (c == state.quote) {
+        .xml_decl_standalone_value_start => |state| if (c == 'y') {
+            self.state = .{ .xml_decl_standalone_value = .{ .quote = state.quote, .left = "es" } };
+            return .{ .xml_declaration = .{ .version = state.version, .encoding = state.encoding, .standalone = true } };
+        } else if (c == 'n') {
+            self.state = .{ .xml_decl_standalone_value = .{ .quote = state.quote, .left = "o" } };
+            return .{ .xml_declaration = .{ .version = state.version, .encoding = state.encoding, .standalone = false } };
+        } else {
+            return error.SyntaxError;
+        },
+
+        .xml_decl_standalone_value => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .{ .xml_decl_standalone_value_end = .{ .quote = state.quote } };
+            } else {
+                self.state = .{ .xml_decl_standalone_value = .{ .quote = state.quote, .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .xml_decl_standalone_value_end => |state| if (c == state.quote) {
             self.state = .xml_decl_after_standalone;
-            return .{ .xml_declaration = .{ .version = state.version, .encoding = state.encoding, .standalone = .{ .start = state.start, .end = self.pos } } };
-        } else if (isValidChar(c)) {
             return .ok;
         } else {
             return error.SyntaxError;
@@ -1001,6 +1046,20 @@ inline fn isNameChar(c: u8) bool {
     };
 }
 
+inline fn isEncodingStartChar(c: u8) bool {
+    return switch (c) {
+        'A'...'Z', 'a'...'z' => true,
+        else => false,
+    };
+}
+
+inline fn isEncodingChar(c: u8) bool {
+    return switch (c) {
+        'A'...'Z', 'a'...'z', '0'...'9', '.', '_', '-' => true,
+        else => false,
+    };
+}
+
 test "empty root element" {
     try testValid("<element/>", &.{
         .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
@@ -1045,6 +1104,22 @@ test "XML declaration" {
         .element_end_empty,
     });
     try testValid(
+        \\<?xml version="1.1"?>
+        \\<root/>
+    , &.{
+        .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 } } },
+        .{ .element_start = .{ .name = .{ .start = 23, .end = 27 } } },
+        .element_end_empty,
+    });
+    try testValid(
+        \\<?xml version="1.999"?>
+        \\<root/>
+    , &.{
+        .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 20 } } },
+        .{ .element_start = .{ .name = .{ .start = 25, .end = 29 } } },
+        .element_end_empty,
+    });
+    try testValid(
         \\<?xml version="1.0" encoding="UTF-8"?>
         \\<root/>
     , &.{
@@ -1061,18 +1136,50 @@ test "XML declaration" {
         .element_end_empty,
     });
     try testValid(
+        \\<?xml version="1.0" encoding="utf-8"?>
+        \\<root/>
+    , &.{
+        .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 }, .encoding = .{ .start = 30, .end = 35 } } },
+        .{ .element_start = .{ .name = .{ .start = 40, .end = 44 } } },
+        .element_end_empty,
+    });
+    try testValid(
+        \\<?xml version="1.0" encoding="Utf-8"?>
+        \\<root/>
+    , &.{
+        .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 }, .encoding = .{ .start = 30, .end = 35 } } },
+        .{ .element_start = .{ .name = .{ .start = 40, .end = 44 } } },
+        .element_end_empty,
+    });
+    try testValid(
+        \\<?xml version="1.0" encoding="ASCII"?>
+        \\<root/>
+    , &.{
+        .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 }, .encoding = .{ .start = 30, .end = 35 } } },
+        .{ .element_start = .{ .name = .{ .start = 40, .end = 44 } } },
+        .element_end_empty,
+    });
+    try testValid(
         \\<?xml version="1.0" standalone="yes"?>
         \\<root/>
     , &.{
-        .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 }, .standalone = .{ .start = 32, .end = 35 } } },
+        .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 }, .standalone = true } },
         .{ .element_start = .{ .name = .{ .start = 40, .end = 44 } } },
+        .element_end_empty,
+    });
+    try testValid(
+        \\<?xml version="1.0" standalone="no"?>
+        \\<root/>
+    , &.{
+        .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 }, .standalone = false } },
+        .{ .element_start = .{ .name = .{ .start = 39, .end = 43 } } },
         .element_end_empty,
     });
     try testValid(
         \\<?xml version = "1.0" standalone = "yes"?>
         \\<root/>
     , &.{
-        .{ .xml_declaration = .{ .version = .{ .start = 17, .end = 20 }, .standalone = .{ .start = 36, .end = 39 } } },
+        .{ .xml_declaration = .{ .version = .{ .start = 17, .end = 20 }, .standalone = true } },
         .{ .element_start = .{ .name = .{ .start = 44, .end = 48 } } },
         .element_end_empty,
     });
@@ -1080,7 +1187,7 @@ test "XML declaration" {
         \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         \\<root/>
     , &.{
-        .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 }, .encoding = .{ .start = 30, .end = 35 }, .standalone = .{ .start = 49, .end = 52 } } },
+        .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 }, .encoding = .{ .start = 30, .end = 35 }, .standalone = true } },
         .{ .element_start = .{ .name = .{ .start = 57, .end = 61 } } },
         .element_end_empty,
     });
@@ -1088,7 +1195,7 @@ test "XML declaration" {
         \\<?xml version = "1.0" encoding = "UTF-8" standalone = "yes"?>
         \\<root/>
     , &.{
-        .{ .xml_declaration = .{ .version = .{ .start = 17, .end = 20 }, .encoding = .{ .start = 34, .end = 39 }, .standalone = .{ .start = 55, .end = 58 } } },
+        .{ .xml_declaration = .{ .version = .{ .start = 17, .end = 20 }, .encoding = .{ .start = 34, .end = 39 }, .standalone = true } },
         .{ .element_start = .{ .name = .{ .start = 63, .end = 67 } } },
         .element_end_empty,
     });
@@ -1187,6 +1294,15 @@ test "invalid XML declaration" {
     // try testInvalid("<?xml?>", 5);
     try testInvalid("<? xml version='1.0' ?>", 2);
     try testInvalid("<?xml version='1.0' standalone='yes' encoding='UTF-8'?>", 37);
+    try testInvalid("<?xml version=\"2.0\"?>", 15);
+    try testInvalid("<?xml version=\"1.\"?>", 17);
+    try testInvalid("<?xml version='1'?>", 16);
+    try testInvalid("<?xml version=''?>", 15);
+    try testInvalid("<?xml version='1.0' encoding=''?>", 30);
+    try testInvalid("<?xml version='1.0' encoding=\"?\"?>", 30);
+    try testInvalid("<?xml version='1.0' encoding=\"UTF-?\"?>", 34);
+    try testInvalid("<?xml version='1.0' standalone='yno'?>", 33);
+    try testInvalid("<?xml version=\"1.0\" standalone=\"\"", 32);
 }
 
 test "invalid references" {
@@ -1276,6 +1392,8 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
         .xml_decl_version_name,
         .xml_decl_after_version_name,
         .xml_decl_after_version_equals,
+        .xml_decl_standalone_value,
+        .xml_decl_standalone_value_end,
         .xml_decl_after_standalone,
         .xml_decl_end,
         .start_after_xml_decl,
@@ -1312,17 +1430,19 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
         // be emitted as a token cannot be reset
         .pi_or_xml_decl_start,
 
+        .xml_decl_version_value_start,
         .xml_decl_version_value,
         .xml_decl_after_version,
         .xml_decl_encoding_name,
         .xml_decl_after_encoding_name,
         .xml_decl_after_encoding_equals,
+        .xml_decl_encoding_value_start,
         .xml_decl_encoding_value,
         .xml_decl_after_encoding,
         .xml_decl_standalone_name,
         .xml_decl_after_standalone_name,
         .xml_decl_after_standalone_equals,
-        .xml_decl_standalone_value,
+        .xml_decl_standalone_value_start,
 
         // None of the "maybe_end" states can be reset because we don't know if
         // the resulting content token should include the possible ending
