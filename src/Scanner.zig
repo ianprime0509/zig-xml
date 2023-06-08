@@ -183,7 +183,7 @@ const State = union(enum) {
     /// Same as unknown_start, but also allows the xml and doctype declarations.
     unknown_document_start,
     /// Start of a PI or XML declaration after '<?'.
-    pi_or_xml_decl_start: struct { start: usize, xml_left: []const u8 },
+    pi_or_xml_decl_start: struct { start: usize, xml_seen: TokenMatcher("xml") = .{} },
 
     /// XML declaration after '<?xml '.
     xml_decl,
@@ -247,7 +247,7 @@ const State = union(enum) {
     /// PI after '<?'.
     pi,
     /// In PI target name.
-    pi_target: struct { start: usize },
+    pi_target: struct { start: usize, xml_seen: TokenMatcher("xml") = .{} },
     /// After PI target.
     pi_after_target,
     /// In PI content after target name.
@@ -315,6 +315,33 @@ const State = union(enum) {
     @"error",
 };
 
+/// A matcher which keeps track of whether the input does/might match a fixed token.
+fn TokenMatcher(comptime token: []const u8) type {
+    const invalid = token ++ "\x00";
+
+    return struct {
+        seen: []const u8 = "",
+
+        const Self = @This();
+
+        pub fn accept(self: Self, c: u8) Self {
+            if (self.seen.len < token.len and c == token[self.seen.len]) {
+                return .{ .seen = token[0 .. self.seen.len + 1] };
+            } else {
+                return .{ .seen = invalid };
+            }
+        }
+
+        pub fn matches(self: Self) bool {
+            return self.seen.len == token.len;
+        }
+
+        pub fn mightMatch(self: Self) bool {
+            return self.seen.len <= token.len;
+        }
+    };
+}
+
 /// Accepts a single byte of input, returning the token found or an error.
 pub inline fn next(self: *Scanner, c: u8) error{SyntaxError}!Token {
     const token = self.nextNoAdvance(c) catch |e| {
@@ -344,7 +371,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             self.state = .{ .element_start_name = .{ .start = self.pos } };
             return .ok;
         } else if (c == '?') {
-            self.state = .{ .pi_or_xml_decl_start = .{ .start = self.pos + 1, .xml_left = "xml " } };
+            self.state = .{ .pi_or_xml_decl_start = .{ .start = self.pos + 1 } };
             return .ok;
         } else if (c == '!') {
             // TODO: doctype
@@ -354,22 +381,30 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .pi_or_xml_decl_start => |state| if (c == state.xml_left[0]) {
-            if (state.xml_left.len == 1) {
-                self.state = .xml_decl;
+        .pi_or_xml_decl_start => |state| if (isNameStartChar(c) or (isNameChar(c) and self.pos > state.start)) {
+            const xml_seen = state.xml_seen.accept(c);
+            if (xml_seen.mightMatch()) {
+                self.state = .{ .pi_or_xml_decl_start = .{ .start = state.start, .xml_seen = xml_seen } };
             } else {
-                self.state = .{ .pi_or_xml_decl_start = .{ .start = state.start, .xml_left = state.xml_left[1..] } };
+                self.state = .{ .pi_target = .{ .start = state.start, .xml_seen = xml_seen } };
             }
             return .ok;
-        } else if (isNameStartChar(c) or (isNameChar(c) and self.pos > state.start)) {
-            self.state = .{ .pi_target = .{ .start = state.start } };
-            return .ok;
         } else if (isSpaceChar(c) and self.pos > state.start) {
-            self.state = .pi_after_target;
-            return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
+            if (state.xml_seen.matches()) {
+                self.state = .xml_decl;
+                return .ok;
+            } else {
+                self.state = .pi_after_target;
+                return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
+            }
         } else if (c == '?' and self.pos > state.start) {
-            self.state = .{ .pi_maybe_end = .{ .start = self.pos } };
-            return .ok;
+            if (state.xml_seen.matches()) {
+                // Can't have an XML declaration without a version
+                return error.SyntaxError;
+            } else {
+                self.state = .{ .pi_maybe_end = .{ .start = self.pos } };
+                return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
+            }
         } else {
             return error.SyntaxError;
         },
@@ -647,20 +682,30 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .pi => if (isNameStartChar(c)) {
-            self.state = .{ .pi_target = .{ .start = self.pos } };
+            self.state = .{ .pi_target = .{ .start = self.pos, .xml_seen = (TokenMatcher("xml"){}).accept(c) } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
         .pi_target => |state| if (isNameChar(c)) {
+            self.state = .{ .pi_target = .{ .start = state.start, .xml_seen = state.xml_seen.accept(c) } };
             return .ok;
         } else if (isSpaceChar(c)) {
-            self.state = .pi_after_target;
-            return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
+            if (state.xml_seen.matches()) {
+                // PI named 'xml' is not allowed
+                return error.SyntaxError;
+            } else {
+                self.state = .pi_after_target;
+                return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
+            }
         } else if (c == '?') {
-            self.state = .{ .pi_maybe_end = .{ .start = self.pos } };
-            return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
+            if (state.xml_seen.matches()) {
+                return error.SyntaxError;
+            } else {
+                self.state = .{ .pi_maybe_end = .{ .start = self.pos } };
+                return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
+            }
         } else {
             return error.SyntaxError;
         },
@@ -688,7 +733,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
 
         .pi_maybe_end => |state| if (c == '>') {
             self.state = .{ .content = .{ .start = self.pos + 1 } };
-            return .{ .pi_content = .{ .content = .{ .start = state.start, .end = self.pos - 1 }, .final = true } };
+            return .{ .pi_content = .{ .content = .{ .start = state.start, .end = self.pos - "?".len }, .final = true } };
         } else if (isValidChar(c)) {
             self.state = .{ .pi_content = .{ .start = state.start } };
             return .ok;
@@ -1245,6 +1290,27 @@ test "references" {
     });
 }
 
+test "PI at document start" {
+    try testValid("<?some-pi?><root/>", &.{
+        .{ .pi_start = .{ .target = .{ .start = 2, .end = 9 } } },
+        .{ .pi_content = .{ .content = .{ .start = 9, .end = 9 }, .final = true } },
+        .{ .element_start = .{ .name = .{ .start = 12, .end = 16 } } },
+        .element_end_empty,
+    });
+    try testValid("<?xm?><root/>", &.{
+        .{ .pi_start = .{ .target = .{ .start = 2, .end = 4 } } },
+        .{ .pi_content = .{ .content = .{ .start = 4, .end = 4 }, .final = true } },
+        .{ .element_start = .{ .name = .{ .start = 7, .end = 11 } } },
+        .element_end_empty,
+    });
+    try testValid("<?xmlm?><root/>", &.{
+        .{ .pi_start = .{ .target = .{ .start = 2, .end = 6 } } },
+        .{ .pi_content = .{ .content = .{ .start = 6, .end = 6 }, .final = true } },
+        .{ .element_start = .{ .name = .{ .start = 9, .end = 13 } } },
+        .element_end_empty,
+    });
+}
+
 test "complex document" {
     try testValid(
         \\<?xml version="1.0"?>
@@ -1313,8 +1379,7 @@ test "invalid top-level text" {
 }
 
 test "invalid XML declaration" {
-    // TODO: be stricter about not allowing xml as a PI target so this will fail:
-    // try testInvalid("<?xml?>", 5);
+    try testInvalid("<?xml?>", 5);
     try testInvalid("<? xml version='1.0' ?>", 2);
     try testInvalid("<?xml version='1.0' standalone='yes' encoding='UTF-8'?>", 37);
     try testInvalid("<?xml version=\"2.0\"?>", 15);
@@ -1328,7 +1393,11 @@ test "invalid XML declaration" {
     try testInvalid("<?xml version=\"1.0\" standalone=\"\"", 32);
 }
 
-test "invalid references" {
+test "invalid PI" {
+    try testInvalid("<?xml version='1.0'?><?xml version='1.0'?>", 26);
+}
+
+test "invalid reference" {
     try testInvalid("<element>&</element>", 10);
     try testInvalid("<element>&amp</element>", 13);
     try testInvalid("<element>&#ABC;</element>", 11);
