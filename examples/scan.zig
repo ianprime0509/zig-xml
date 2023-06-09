@@ -1,5 +1,5 @@
 const std = @import("std");
-const Scanner = @import("xml").Scanner;
+const xml = @import("xml");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -22,16 +22,24 @@ pub fn main() !void {
     defer input_file.close();
     var input_buffered_reader = std.io.bufferedReader(input_file.reader());
     var input_reader = input_buffered_reader.reader();
-    var scanner = Scanner{};
+    var scanner = xml.Scanner{};
+    var decoder = xml.encoding.Utf8Decoder{};
 
     var line: usize = 1;
     var column: usize = 1;
-    while (true) {
-        const c = input_reader.readByte() catch |e| switch (e) {
-            error.EndOfStream => break,
-            else => return e,
+    read: while (true) {
+        var codepoint_bytes: usize = 0;
+        const c = while (true) {
+            const b = input_reader.readByte() catch |e| switch (e) {
+                error.EndOfStream => break :read,
+                else => |other| return other,
+            };
+            codepoint_bytes += 1;
+            if (try decoder.next(b)) |codepoint| {
+                break codepoint;
+            }
         };
-        const token = scanner.next(c) catch |e| {
+        const token = scanner.next(c, codepoint_bytes) catch |e| {
             try stdout_buffered_writer.flush();
             try stderr.print("error: {} ({}:{}): {}\n", .{ scanner.pos, line, column, e });
             return;

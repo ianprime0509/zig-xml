@@ -1,7 +1,7 @@
 //! A simple, low-level streaming XML parser.
 //!
 //! The design of the parser is strongly inspired by
-//! [Yxml](https://dev.yorhel.nl/yxml). Bytes are fed to the parser one by one
+//! [Yxml](https://dev.yorhel.nl/yxml). Codepoints are fed to the parser one by one
 //! using the `next` function, then the `endInput` function should be used to
 //! check that the parser is in a valid state for the end of input (e.g. not in
 //! the middle of parsing an element). The tokens returned by the parser
@@ -10,10 +10,6 @@
 //! Intentional (permanent) limitations (which can be addressed by
 //! higher-level APIs):
 //!
-//! - Only supports ASCII-compatible encodings, and does not validate
-//!   correctness of byte values >= 128 (for example, any byte value >= 128 is
-//!   considered valid in names and text content, and is not validated to be
-//!   valid UTF-8 or any other encoding).
 //! - Does not validate that corresponding open and close tags match.
 //! - Does not validate that attribute names are not duplicated.
 //! - Does not do any special handling of namespaces.
@@ -21,8 +17,7 @@
 //!   values (including normalization, expansion of entities, etc.).
 //!   - However, note that entity and character references in text content and
 //!     attribute values _are_ validated for correct syntax, although their
-//!     content is not (they may reference non-existent entities or
-//!     out-of-bounds characters).
+//!     content is not (they may reference non-existent entities).
 //! - Does not process DTDs in any way besides parsing them (TODO: see below).
 //!
 //! Unintentional (temporary) limitations (which will be removed over time):
@@ -31,20 +26,17 @@
 //! - Need to evaluate to what extent XML 1.1 can be supported within the
 //!   constraints of this design (e.g. non-ASCII whitespace will definitely not
 //!   be supported, but other stuff might work).
-//! - Entity references in text content and attribute values are not validated
-//!   (while this parser will never expand such references, they should be
-//!   validated and represented in the state machine).
-//! - Some validations (e.g. of XML declaration contents) are not as strict as
-//!   they reasonably could/should be within the constraints of this design
-//!   (e.g. the version number is not validated to match `1.[0-9]+`).
 //! - Not extensively tested/fuzzed.
 
 /// The current state of the scanner.
 state: State = .start,
-/// The current byte position in the input.
+/// The current position in the input.
 ///
-/// This is not necessarily the byte position relative to the start of the
-/// document: see the `resetPos` function and the documentation of `Token`.
+/// The meaning of this position is determined by the meaning of the `len`
+/// value passed to `next`, which is determined by the user. For example, a
+/// user with a byte slice or reader would probably want to pass `len` as the
+/// number of bytes making up the codepoint, which would make `pos` a byte
+/// offset.
 pos: usize = 0,
 /// The current element nesting depth.
 depth: usize = 0,
@@ -53,6 +45,7 @@ seen_root_element: bool = false,
 
 const std = @import("std");
 const testing = std.testing;
+const unicode = std.unicode;
 
 const Scanner = @This();
 
@@ -240,7 +233,7 @@ const State = union(enum) {
     /// Comment.
     comment: struct { start: usize },
     /// Comment after consuming one '-'.
-    comment_maybe_before_end: struct { start: usize },
+    comment_maybe_before_end: struct { start: usize, end: usize },
     /// Comment after consuming '--'.
     comment_before_end,
 
@@ -253,14 +246,14 @@ const State = union(enum) {
     /// In PI content after target name.
     pi_content: struct { start: usize },
     /// Possible end of PI after '?'.
-    pi_maybe_end: struct { start: usize },
+    pi_maybe_end: struct { start: usize, end: usize },
 
     /// A '<![' (and possibly some part of 'CDATA[' after it) has been encountered.
     cdata_before_start: struct { left: []const u8 },
     /// CDATA.
     cdata: struct { start: usize },
     /// In CDATA content after some part of ']]>'.
-    cdata_maybe_end: struct { start: usize, left: []const u8 },
+    cdata_maybe_end: struct { start: usize, end: usize, left: []const u8 },
 
     /// Name of element start tag.
     element_start_name: struct { start: usize },
@@ -315,7 +308,8 @@ const State = union(enum) {
     @"error",
 };
 
-/// A matcher which keeps track of whether the input does/might match a fixed token.
+/// A matcher which keeps track of whether the input does/might match a fixed
+/// ASCII token.
 fn TokenMatcher(comptime token: []const u8) type {
     const invalid = token ++ "\x00";
 
@@ -324,7 +318,7 @@ fn TokenMatcher(comptime token: []const u8) type {
 
         const Self = @This();
 
-        pub fn accept(self: Self, c: u8) Self {
+        pub fn accept(self: Self, c: u21) Self {
             if (self.seen.len < token.len and c == token[self.seen.len]) {
                 return .{ .seen = token[0 .. self.seen.len + 1] };
             } else {
@@ -342,13 +336,19 @@ fn TokenMatcher(comptime token: []const u8) type {
     };
 }
 
-/// Accepts a single byte of input, returning the token found or an error.
-pub inline fn next(self: *Scanner, c: u8) error{SyntaxError}!Token {
-    const token = self.nextNoAdvance(c) catch |e| {
+/// Accepts a single codepoint of input, returning the token found or an error.
+///
+/// The `len` argument determines how `pos` (and hence any ranges in the
+/// returned tokens) behaves. A byte-oriented user will probably want to pass
+/// the number of bytes making up the codepoint so that all ranges are byte
+/// ranges, but it is also valid to use other interpretations (e.g. the user
+/// could always pass 1 if the input is already parsed into codepoints).
+pub inline fn next(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
+    const token = self.nextNoAdvance(c, len) catch |e| {
         self.state = .@"error";
         return e;
     };
-    self.pos += 1;
+    self.pos += len;
     return token;
 }
 
@@ -356,9 +356,9 @@ pub inline fn next(self: *Scanner, c: u8) error{SyntaxError}!Token {
 /// position (which should only be advanced in case of success: basically this
 /// function is needed because Zig has no "successdefer" to advance `pos` only
 /// in case of success).
-fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
+fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
     switch (self.state) {
-        .start => if (isSpaceChar(c)) {
+        .start => if (isSpace(c)) {
             return .ok;
         } else if (c == '<') {
             self.state = .unknown_document_start;
@@ -371,7 +371,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             self.state = .{ .element_start_name = .{ .start = self.pos } };
             return .ok;
         } else if (c == '?') {
-            self.state = .{ .pi_or_xml_decl_start = .{ .start = self.pos + 1 } };
+            self.state = .{ .pi_or_xml_decl_start = .{ .start = self.pos + len } };
             return .ok;
         } else if (c == '!') {
             // TODO: doctype
@@ -389,7 +389,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
                 self.state = .{ .pi_target = .{ .start = state.start, .xml_seen = xml_seen } };
             }
             return .ok;
-        } else if (isSpaceChar(c) and self.pos > state.start) {
+        } else if (isSpace(c) and self.pos > state.start) {
             if (state.xml_seen.matches()) {
                 self.state = .xml_decl;
                 return .ok;
@@ -402,14 +402,14 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
                 // Can't have an XML declaration without a version
                 return error.SyntaxError;
             } else {
-                self.state = .{ .pi_maybe_end = .{ .start = self.pos } };
+                self.state = .{ .pi_maybe_end = .{ .start = self.pos, .end = self.pos } };
                 return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
             }
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl => if (isSpaceChar(c)) {
+        .xml_decl => if (isSpace(c)) {
             return .ok;
         } else if (c == 'v') {
             self.state = .{ .xml_decl_version_name = .{ .left = "ersion" } };
@@ -429,7 +429,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_version_name => if (isSpaceChar(c)) {
+        .xml_decl_after_version_name => if (isSpace(c)) {
             return .ok;
         } else if (c == '=') {
             self.state = .xml_decl_after_version_equals;
@@ -438,10 +438,10 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_version_equals => if (isSpaceChar(c)) {
+        .xml_decl_after_version_equals => if (isSpace(c)) {
             return .ok;
         } else if (c == '"' or c == '\'') {
-            self.state = .{ .xml_decl_version_value_start = .{ .start = self.pos + 1, .quote = c, .left = "1." } };
+            self.state = .{ .xml_decl_version_value_start = .{ .start = self.pos + len, .quote = @intCast(u8, c), .left = "1." } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -461,13 +461,13 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .xml_decl_version_value => |state| if (c == state.quote and self.pos > state.start + "1.".len) {
             self.state = .{ .xml_decl_after_version = .{ .version = .{ .start = state.start, .end = self.pos } } };
             return .ok;
-        } else if (isDigitChar(c)) {
+        } else if (isDigit(c)) {
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_version => |state| if (isSpaceChar(c)) {
+        .xml_decl_after_version => |state| if (isSpace(c)) {
             return .ok;
         } else if (c == 'e') {
             self.state = .{ .xml_decl_encoding_name = .{ .version = state.version, .left = "ncoding" } };
@@ -493,7 +493,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_encoding_name => |state| if (isSpaceChar(c)) {
+        .xml_decl_after_encoding_name => |state| if (isSpace(c)) {
             return .ok;
         } else if (c == '=') {
             self.state = .{ .xml_decl_after_encoding_equals = .{ .version = state.version } };
@@ -502,10 +502,10 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_encoding_equals => |state| if (isSpaceChar(c)) {
+        .xml_decl_after_encoding_equals => |state| if (isSpace(c)) {
             return .ok;
         } else if (c == '"' or c == '\'') {
-            self.state = .{ .xml_decl_encoding_value_start = .{ .version = state.version, .start = self.pos + 1, .quote = c } };
+            self.state = .{ .xml_decl_encoding_value_start = .{ .version = state.version, .start = self.pos + len, .quote = @intCast(u8, c) } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -527,7 +527,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_encoding => |state| if (isSpaceChar(c)) {
+        .xml_decl_after_encoding => |state| if (isSpace(c)) {
             return .ok;
         } else if (c == 's') {
             self.state = .{ .xml_decl_standalone_name = .{ .version = state.version, .encoding = state.encoding, .left = "tandalone" } };
@@ -550,7 +550,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_standalone_name => |state| if (isSpaceChar(c)) {
+        .xml_decl_after_standalone_name => |state| if (isSpace(c)) {
             return .ok;
         } else if (c == '=') {
             self.state = .{ .xml_decl_after_standalone_equals = .{ .version = state.version, .encoding = state.encoding } };
@@ -559,10 +559,10 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_standalone_equals => |state| if (isSpaceChar(c)) {
+        .xml_decl_after_standalone_equals => |state| if (isSpace(c)) {
             return .ok;
         } else if (c == '"' or c == '\'') {
-            self.state = .{ .xml_decl_standalone_value_start = .{ .version = state.version, .encoding = state.encoding, .quote = c } };
+            self.state = .{ .xml_decl_standalone_value_start = .{ .version = state.version, .encoding = state.encoding, .quote = @intCast(u8, c) } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -596,7 +596,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_standalone => if (isSpaceChar(c)) {
+        .xml_decl_after_standalone => if (isSpace(c)) {
             return .ok;
         } else if (c == '?') {
             self.state = .xml_decl_end;
@@ -612,7 +612,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .start_after_xml_decl => if (isSpaceChar(c)) {
+        .start_after_xml_decl => if (isSpace(c)) {
             return .ok;
         } else if (c == '<') {
             self.state = .unknown_start;
@@ -649,16 +649,16 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .comment_before_start => if (c == '-') {
-            self.state = .{ .comment = .{ .start = self.pos + 1 } };
+            self.state = .{ .comment = .{ .start = self.pos + len } };
             return .comment_start;
         } else {
             return error.SyntaxError;
         },
 
         .comment => |state| if (c == '-') {
-            self.state = .{ .comment_maybe_before_end = .{ .start = state.start } };
+            self.state = .{ .comment_maybe_before_end = .{ .start = state.start, .end = self.pos } };
             return .ok;
-        } else if (isValidChar(c)) {
+        } else if (isChar(c)) {
             return .ok;
         } else {
             return error.SyntaxError;
@@ -666,8 +666,8 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
 
         .comment_maybe_before_end => |state| if (c == '-') {
             self.state = .comment_before_end;
-            return .{ .comment_content = .{ .content = .{ .start = state.start, .end = self.pos - 1 }, .final = true } };
-        } else if (isValidChar(c)) {
+            return .{ .comment_content = .{ .content = .{ .start = state.start, .end = state.end }, .final = true } };
+        } else if (isChar(c)) {
             self.state = .{ .comment = .{ .start = state.start } };
             return .ok;
         } else {
@@ -675,7 +675,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .comment_before_end => if (c == '>') {
-            self.state = .{ .content = .{ .start = self.pos + 1 } };
+            self.state = .{ .content = .{ .start = self.pos + len } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -691,7 +691,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .pi_target => |state| if (isNameChar(c)) {
             self.state = .{ .pi_target = .{ .start = state.start, .xml_seen = state.xml_seen.accept(c) } };
             return .ok;
-        } else if (isSpaceChar(c)) {
+        } else if (isSpace(c)) {
             if (state.xml_seen.matches()) {
                 // PI named 'xml' is not allowed
                 return error.SyntaxError;
@@ -703,38 +703,38 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             if (state.xml_seen.matches()) {
                 return error.SyntaxError;
             } else {
-                self.state = .{ .pi_maybe_end = .{ .start = self.pos } };
+                self.state = .{ .pi_maybe_end = .{ .start = self.pos, .end = self.pos } };
                 return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
             }
         } else {
             return error.SyntaxError;
         },
 
-        .pi_after_target => if (isSpaceChar(c)) {
+        .pi_after_target => if (isSpace(c)) {
             return .ok;
-        } else if (isValidChar(c)) {
+        } else if (isChar(c)) {
             self.state = .{ .pi_content = .{ .start = self.pos } };
             return .ok;
         } else if (c == '?') {
-            self.state = .{ .pi_maybe_end = .{ .start = self.pos } };
+            self.state = .{ .pi_maybe_end = .{ .start = self.pos, .end = self.pos } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
         .pi_content => |state| if (c == '?') {
-            self.state = .{ .pi_maybe_end = .{ .start = state.start } };
+            self.state = .{ .pi_maybe_end = .{ .start = state.start, .end = self.pos } };
             return .ok;
-        } else if (isValidChar(c)) {
+        } else if (isChar(c)) {
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
         .pi_maybe_end => |state| if (c == '>') {
-            self.state = .{ .content = .{ .start = self.pos + 1 } };
-            return .{ .pi_content = .{ .content = .{ .start = state.start, .end = self.pos - "?".len }, .final = true } };
-        } else if (isValidChar(c)) {
+            self.state = .{ .content = .{ .start = self.pos + len } };
+            return .{ .pi_content = .{ .content = .{ .start = state.start, .end = state.end }, .final = true } };
+        } else if (isChar(c)) {
             self.state = .{ .pi_content = .{ .start = state.start } };
             return .ok;
         } else {
@@ -743,7 +743,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
 
         .cdata_before_start => |state| if (c == state.left[0]) {
             if (state.left.len == 1) {
-                self.state = .{ .cdata = .{ .start = self.pos + 1 } };
+                self.state = .{ .cdata = .{ .start = self.pos + len } };
             } else {
                 self.state = .{ .cdata_before_start = .{ .left = state.left[1..] } };
             }
@@ -753,9 +753,9 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         },
 
         .cdata => |state| if (c == ']') {
-            self.state = .{ .cdata_maybe_end = .{ .start = state.start, .left = "]>" } };
+            self.state = .{ .cdata_maybe_end = .{ .start = state.start, .end = self.pos, .left = "]>" } };
             return .ok;
-        } else if (isValidChar(c)) {
+        } else if (isChar(c)) {
             return .ok;
         } else {
             return error.SyntaxError;
@@ -763,13 +763,13 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
 
         .cdata_maybe_end => |state| if (c == state.left[0]) {
             if (state.left.len == 1) {
-                self.state = .{ .content = .{ .start = self.pos + 1 } };
-                return .{ .element_content = .{ .content = .{ .text = .{ .start = state.start, .end = self.pos - "]]".len } } } };
+                self.state = .{ .content = .{ .start = self.pos + len } };
+                return .{ .element_content = .{ .content = .{ .text = .{ .start = state.start, .end = state.end } } } };
             } else {
-                self.state = .{ .cdata_maybe_end = .{ .start = state.start, .left = state.left[1..] } };
+                self.state = .{ .cdata_maybe_end = .{ .start = state.start, .end = state.end, .left = state.left[1..] } };
                 return .ok;
             }
-        } else if (isValidChar(c)) {
+        } else if (isChar(c)) {
             self.state = .{ .cdata = .{ .start = state.start } };
             return .ok;
         } else {
@@ -778,7 +778,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
 
         .element_start_name => |state| if (isNameChar(c)) {
             return .ok;
-        } else if (isSpaceChar(c)) {
+        } else if (isSpace(c)) {
             const name = Range{ .start = state.start, .end = self.pos };
             self.state = .element_start_after_name;
             return .{ .element_start = .{ .name = name } };
@@ -788,13 +788,13 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return .{ .element_start = .{ .name = name } };
         } else if (c == '>') {
             self.depth += 1;
-            self.state = .{ .content = .{ .start = self.pos + 1 } };
+            self.state = .{ .content = .{ .start = self.pos + len } };
             return .{ .element_start = .{ .name = .{ .start = state.start, .end = self.pos } } };
         } else {
             return error.SyntaxError;
         },
 
-        .element_start_after_name => if (isSpaceChar(c)) {
+        .element_start_after_name => if (isSpace(c)) {
             return .ok;
         } else if (isNameStartChar(c)) {
             self.state = .{ .attribute_name = .{ .start = self.pos } };
@@ -804,7 +804,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return .ok;
         } else if (c == '>') {
             self.depth += 1;
-            self.state = .{ .content = .{ .start = self.pos + 1 } };
+            self.state = .{ .content = .{ .start = self.pos + len } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -814,7 +814,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             if (self.depth == 0) {
                 self.seen_root_element = true;
             }
-            self.state = .{ .content = .{ .start = self.pos + 1 } };
+            self.state = .{ .content = .{ .start = self.pos + len } };
             return .element_end_empty;
         } else {
             return error.SyntaxError;
@@ -822,7 +822,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
 
         .attribute_name => |state| if (isNameChar(c)) {
             return .ok;
-        } else if (isSpaceChar(c)) {
+        } else if (isSpace(c)) {
             self.state = .attribute_after_name;
             return .{ .attribute_start = .{ .name = .{ .start = state.start, .end = self.pos } } };
         } else if (c == '=') {
@@ -832,7 +832,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .attribute_after_name => if (isSpaceChar(c)) {
+        .attribute_after_name => if (isSpace(c)) {
             return .ok;
         } else if (c == '=') {
             self.state = .attribute_after_equals;
@@ -841,10 +841,10 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .attribute_after_equals => if (isSpaceChar(c)) {
+        .attribute_after_equals => if (isSpace(c)) {
             return .ok;
         } else if (c == '"' or c == '\'') {
-            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = c } };
+            self.state = .{ .attribute_content = .{ .start = self.pos + len, .quote = @intCast(u8, c) } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -862,7 +862,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             } else {
                 return .{ .attribute_content = .{ .content = .{ .text = range } } };
             }
-        } else if (isValidChar(c)) {
+        } else if (isChar(c)) {
             return .ok;
         } else {
             return error.SyntaxError;
@@ -881,14 +881,14 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .attribute_content_entity_ref_name => |state| if (isNameChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = state.quote } };
+            self.state = .{ .attribute_content = .{ .start = self.pos + len, .quote = state.quote } };
             return .{ .attribute_content = .{ .content = .{ .entity_ref = .{ .start = state.start, .end = self.pos } } } };
         } else {
             return error.SyntaxError;
         },
 
-        .attribute_content_char_ref_start => |state| if (isDigitChar(c)) {
-            self.state = .{ .attribute_content_char_ref = .{ .hex = false, .value = digitCharValue(c), .quote = state.quote } };
+        .attribute_content_char_ref_start => |state| if (isDigit(c)) {
+            self.state = .{ .attribute_content_char_ref = .{ .hex = false, .value = digitValue(c), .quote = state.quote } };
             return .ok;
         } else if (c == 'x') {
             self.state = .{ .attribute_content_char_ref = .{ .hex = true, .value = 0, .quote = state.quote } };
@@ -897,24 +897,24 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .attribute_content_char_ref => |state| if (!state.hex and isDigitChar(c)) {
-            const value = 10 * @as(u32, state.value) + digitCharValue(c);
+        .attribute_content_char_ref => |state| if (!state.hex and isDigit(c)) {
+            const value = 10 * @as(u32, state.value) + digitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
             } else {
                 self.state = .{ .attribute_content_char_ref = .{ .hex = false, .value = @intCast(u21, value), .quote = state.quote } };
                 return .ok;
             }
-        } else if (state.hex and isHexDigitChar(c)) {
-            const value = 16 * @as(u32, state.value) + hexDigitCharValue(c);
+        } else if (state.hex and isHexDigit(c)) {
+            const value = 16 * @as(u32, state.value) + hexDigitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
             } else {
                 self.state = .{ .attribute_content_char_ref = .{ .hex = true, .value = @intCast(u21, value), .quote = state.quote } };
                 return .ok;
             }
-        } else if (c == ';' and isValidCharCodepoint(state.value)) {
-            self.state = .{ .attribute_content = .{ .start = self.pos + 1, .quote = state.quote } };
+        } else if (c == ';' and isChar(state.value)) {
+            self.state = .{ .attribute_content = .{ .start = self.pos + len, .quote = state.quote } };
             return .{ .attribute_content = .{ .content = .{ .char_ref = state.value } } };
         } else {
             return error.SyntaxError;
@@ -929,7 +929,7 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
 
         .element_end_name => |state| if (isNameChar(c)) {
             return .ok;
-        } else if (isSpaceChar(c)) {
+        } else if (isSpace(c)) {
             self.state = .element_end_after_name;
             return .{ .element_end = .{ .name = .{ .start = state.start, .end = self.pos } } };
         } else if (c == '>') {
@@ -937,20 +937,20 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             if (self.depth == 0) {
                 self.seen_root_element = true;
             }
-            self.state = .{ .content = .{ .start = self.pos + 1 } };
+            self.state = .{ .content = .{ .start = self.pos + len } };
             return .{ .element_end = .{ .name = .{ .start = state.start, .end = self.pos } } };
         } else {
             return error.SyntaxError;
         },
 
-        .element_end_after_name => if (isSpaceChar(c)) {
+        .element_end_after_name => if (isSpace(c)) {
             return .ok;
         } else if (c == '>') {
             self.depth -= 1;
             if (self.depth == 0) {
                 self.seen_root_element = true;
             }
-            self.state = .{ .content = .{ .start = self.pos + 1 } };
+            self.state = .{ .content = .{ .start = self.pos + len } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -976,10 +976,10 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             } else {
                 return .{ .element_content = .{ .content = .{ .text = range } } };
             }
-        } else if (self.depth > 0 and isValidChar(c)) {
+        } else if (self.depth > 0 and isChar(c)) {
             // Textual content is not allowed outside the root element.
             return .ok;
-        } else if (isSpaceChar(c)) {
+        } else if (isSpace(c)) {
             // Spaces are allowed outside the root element. Another check in
             // this state will prevent a text token from being emitted at the
             // end of the whitespace.
@@ -1001,14 +1001,14 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
         .content_entity_ref_name => |state| if (isNameChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .content = .{ .start = self.pos + 1 } };
+            self.state = .{ .content = .{ .start = self.pos + len } };
             return .{ .element_content = .{ .content = .{ .entity_ref = .{ .start = state.start, .end = self.pos } } } };
         } else {
             return error.SyntaxError;
         },
 
-        .content_char_ref_start => if (isDigitChar(c)) {
-            self.state = .{ .content_char_ref = .{ .hex = false, .value = digitCharValue(c) } };
+        .content_char_ref_start => if (isDigit(c)) {
+            self.state = .{ .content_char_ref = .{ .hex = false, .value = digitValue(c) } };
             return .ok;
         } else if (c == 'x') {
             self.state = .{ .content_char_ref = .{ .hex = true, .value = 0 } };
@@ -1017,24 +1017,24 @@ fn nextNoAdvance(self: *Scanner, c: u8) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .content_char_ref => |state| if (!state.hex and isDigitChar(c)) {
-            const value = 10 * @as(u32, state.value) + digitCharValue(c);
+        .content_char_ref => |state| if (!state.hex and isDigit(c)) {
+            const value = 10 * @as(u32, state.value) + digitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
             } else {
                 self.state = .{ .content_char_ref = .{ .hex = false, .value = @intCast(u21, value) } };
                 return .ok;
             }
-        } else if (state.hex and isHexDigitChar(c)) {
-            const value = 16 * @as(u32, state.value) + hexDigitCharValue(c);
+        } else if (state.hex and isHexDigit(c)) {
+            const value = 16 * @as(u32, state.value) + hexDigitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
             } else {
                 self.state = .{ .content_char_ref = .{ .hex = true, .value = @intCast(u21, value) } };
                 return .ok;
             }
-        } else if (c == ';' and isValidCharCodepoint(c)) {
-            self.state = .{ .content = .{ .start = self.pos + 1 } };
+        } else if (c == ';' and isChar(c)) {
+            self.state = .{ .content = .{ .start = self.pos + len } };
             return .{ .element_content = .{ .content = .{ .char_ref = state.value } } };
         } else {
             return error.SyntaxError;
@@ -1053,75 +1053,84 @@ pub fn endInput(self: *Scanner) error{UnexpectedEndOfInput}!void {
     }
 }
 
-inline fn isValidChar(c: u8) bool {
-    return switch (c) {
-        '\t', '\r', '\n', ' '...255 => true,
-        else => false,
-    };
-}
-
-inline fn isValidCharCodepoint(c: u21) bool {
+inline fn isChar(c: u21) bool {
     return switch (c) {
         '\t', '\r', '\n', ' '...0xD7FF, 0xE000...0xFFFD, 0x10000...0x10FFFF => true,
         else => false,
     };
 }
 
-inline fn isSpaceChar(c: u8) bool {
+inline fn isSpace(c: u21) bool {
     return switch (c) {
         ' ', '\t', '\r', '\n' => true,
         else => false,
     };
 }
 
-inline fn isDigitChar(c: u8) bool {
+inline fn isDigit(c: u21) bool {
     return switch (c) {
         '0'...'9' => true,
         else => false,
     };
 }
 
-inline fn digitCharValue(c: u8) u8 {
-    return c - '0';
+inline fn digitValue(c: u21) u4 {
+    return @intCast(u4, c - '0');
 }
 
-inline fn isHexDigitChar(c: u8) bool {
+inline fn isHexDigit(c: u21) bool {
     return switch (c) {
         '0'...'9', 'a'...'f', 'A'...'F' => true,
         else => false,
     };
 }
 
-inline fn hexDigitCharValue(c: u8) u8 {
+inline fn hexDigitValue(c: u21) u4 {
     return switch (c) {
-        'a'...'f' => c - 'a' + 10,
-        'A'...'F' => c - 'A' + 10,
-        else => c - '0',
+        'a'...'f' => @intCast(u4, c - 'a' + 10),
+        'A'...'F' => @intCast(u4, c - 'A' + 10),
+        else => @intCast(u4, c - '0'),
     };
 }
 
-inline fn isNameStartChar(c: u8) bool {
+inline fn isNameStartChar(c: u21) bool {
     return switch (c) {
-        ':', 'A'...'Z', '_', 'a'...'z', 128...255 => true,
+        ':',
+        'A'...'Z',
+        '_',
+        'a'...'z',
+        0xC0...0xD6,
+        0xD8...0xF6,
+        0xF8...0x2FF,
+        0x370...0x37D,
+        0x37F...0x1FFF,
+        0x200C...0x200D,
+        0x2070...0x218F,
+        0x2C00...0x2FEF,
+        0x3001...0xD7FF,
+        0xF900...0xFDCF,
+        0xFDF0...0xFFFD,
+        0x10000...0xEFFFF,
+        => true,
         else => false,
     };
 }
 
-inline fn isNameChar(c: u8) bool {
+inline fn isNameChar(c: u21) bool {
     return if (isNameStartChar(c)) true else switch (c) {
-        '-', '.', '0'...'9' => true,
+        '-', '.', '0'...'9', 0xB7, 0x0300...0x036F, 0x203F...0x2040 => true,
         else => false,
     };
 }
 
-inline fn isEncodingStartChar(c: u8) bool {
+inline fn isEncodingStartChar(c: u21) bool {
     return switch (c) {
         'A'...'Z', 'a'...'z' => true,
         else => false,
     };
 }
 
-inline fn isEncodingChar(c: u8) bool {
+inline fn isEncodingChar(c: u21) bool {
     return switch (c) {
         'A'...'Z', 'a'...'z', '0'...'9', '.', '_', '-' => true,
         else => false,
@@ -1427,10 +1436,12 @@ fn testValid(input: []const u8, expected_tokens: []const Token) !void {
     var scanner = Scanner{};
     var tokens = std.ArrayListUnmanaged(Token){};
     defer tokens.deinit(testing.allocator);
-    for (input) |c| {
-        const token = scanner.next(c) catch |e| switch (e) {
+    var input_codepoints = (try unicode.Utf8View.init(input)).iterator();
+    while (input_codepoints.nextCodepointSlice()) |c_bytes| {
+        const c = unicode.utf8Decode(c_bytes) catch unreachable;
+        const token = scanner.next(c, c_bytes.len) catch |e| switch (e) {
             error.SyntaxError => {
-                std.debug.print("syntax error at char '{}' position {}\n", .{ std.fmt.fmtSliceEscapeLower(&.{c}), scanner.pos });
+                std.debug.print("syntax error at char '{u}' position {}\n", .{ c, scanner.pos });
                 return e;
             },
         };
@@ -1444,8 +1455,10 @@ fn testValid(input: []const u8, expected_tokens: []const Token) !void {
 
 fn testInvalid(input: []const u8, expected_error_pos: usize) !void {
     var scanner = Scanner{};
-    for (input) |c| {
-        _ = scanner.next(c) catch |e| switch (e) {
+    var input_codepoints = (try unicode.Utf8View.init(input)).iterator();
+    while (input_codepoints.nextCodepointSlice()) |c_bytes| {
+        const c = unicode.utf8Decode(c_bytes) catch unreachable;
+        _ = scanner.next(c, c_bytes.len) catch |e| switch (e) {
             error.SyntaxError => {
                 try testing.expectEqual(expected_error_pos, scanner.pos);
                 return;
@@ -1457,8 +1470,10 @@ fn testInvalid(input: []const u8, expected_error_pos: usize) !void {
 
 fn testIncomplete(input: []const u8) !void {
     var scanner = Scanner{};
-    for (input) |c| {
-        _ = try scanner.next(c);
+    var input_codepoints = (try unicode.Utf8View.init(input)).iterator();
+    while (input_codepoints.nextCodepointSlice()) |c_bytes| {
+        const c = unicode.utf8Decode(c_bytes) catch unreachable;
+        _ = try scanner.next(c, c_bytes.len);
     }
     try testing.expectError(error.UnexpectedEndOfInput, scanner.endInput());
 }
@@ -1621,14 +1636,14 @@ test "resetPos inside element content" {
     defer tokens.deinit(testing.allocator);
 
     for ("<element>Hello,") |c| {
-        switch (try scanner.next(c)) {
+        switch (try scanner.next(c, 1)) {
             .ok => {},
             else => |token| try tokens.append(testing.allocator, token),
         }
     }
     try tokens.append(testing.allocator, try scanner.resetPos());
     for (" world!</element>") |c| {
-        switch (try scanner.next(c)) {
+        switch (try scanner.next(c, 1)) {
             .ok => {},
             else => |token| try tokens.append(testing.allocator, token),
         }
@@ -1646,7 +1661,7 @@ test "resetPos inside element reference name" {
     var scanner = Scanner{};
 
     for ("<element>Hello, world &am") |c| {
-        _ = try scanner.next(c);
+        _ = try scanner.next(c, 1);
     }
     try testing.expectError(error.CannotReset, scanner.resetPos());
 }

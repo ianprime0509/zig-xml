@@ -3,6 +3,8 @@ const testing = std.testing;
 
 pub const Scanner = @import("Scanner.zig");
 
+pub const encoding = @import("encoding.zig");
+
 const read = @import("reader.zig");
 pub const Event = read.Event;
 pub const reader = read.reader;

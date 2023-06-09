@@ -5,11 +5,14 @@ const unicode = std.unicode;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const encoding = @import("encoding.zig");
 const xml_node = @import("node.zig");
 const Node = xml_node.Node;
 const OwnedNode = xml_node.OwnedNode;
 const Scanner = @import("Scanner.zig");
 const Token = Scanner.Token;
+
+const max_encoded_codepoint_len = 4;
 
 /// An event emitted by a reader.
 pub const Event = union(enum) {
@@ -85,8 +88,8 @@ pub const entities = std.ComptimeStringMap([]const u8, .{
 });
 
 /// Wraps a `std.io.Reader` in a `Reader` with the default buffer size (4096).
-pub fn reader(allocator: Allocator, r: anytype) Reader(4096, @TypeOf(r)) {
-    return Reader(4096, @TypeOf(r)).init(allocator, r);
+pub fn reader(allocator: Allocator, r: anytype, decoder: anytype) Reader(4096, @TypeOf(r), @TypeOf(decoder)) {
+    return Reader(4096, @TypeOf(r), @TypeOf(decoder)).init(allocator, r, decoder);
 }
 
 /// A streaming XML parser wrapping a `std.io.Reader`.
@@ -101,13 +104,19 @@ pub fn reader(allocator: Allocator, r: anytype) Reader(4096, @TypeOf(r)) {
 /// and the size of the buffer (`buffer_size`) limits the maximum length of
 /// names (element names, attribute names, PI targets, entity names, etc.) and
 /// content events (but not the total length of content, since multiple content
-/// events can be emitted for a single containing context). An allocator is
-/// also used to keep track of internal state, such as a stack of containing
-/// element names.
-pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type) type {
+/// events can be emitted for a single containing context).
+///
+/// An allocator is also used to keep track of internal state, such as a stack
+/// of containing element names.
+pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime DecoderType: type) type {
     return struct {
         scanner: Scanner,
         reader: ReaderType,
+        decoder: DecoderType,
+        /// Buffered content read by the reader for the current event.
+        ///
+        /// Events may reference this buffer via slices. The contents of the
+        /// buffer (up until `scanner.pos`) are always valid UTF-8.
         buffer: [buffer_size]u8 = undefined,
         /// A stack of element names enclosing the current context.
         element_names: ArrayListUnmanaged([]u8) = .{},
@@ -122,15 +131,17 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type) type {
         const Self = @This();
 
         pub const Error = error{
+            InvalidEncoding,
+            Overflow,
             SyntaxError,
             UnexpectedEndOfInput,
-            Overflow,
-        } || Allocator.Error || ReaderType.Error;
+        } || Allocator.Error || ReaderType.Error || DecoderType.Error;
 
-        pub fn init(allocator: Allocator, r: ReaderType) Self {
+        pub fn init(allocator: Allocator, r: ReaderType, decoder: DecoderType) Self {
             return .{
                 .scanner = Scanner{},
                 .reader = r,
+                .decoder = decoder,
                 .allocator = allocator,
             };
         }
@@ -187,26 +198,46 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type) type {
             }
 
             while (true) {
-                if (self.scanner.pos == self.buffer.len) {
-                    const token = self.scanner.resetPos() catch |e| switch (e) {
-                        error.CannotReset => return error.Overflow,
-                    };
-                    if (try self.tokenToEvent(token)) |event| {
-                        return event;
+                if (self.scanner.pos + max_encoded_codepoint_len >= buffer_size) {
+                    if (self.scanner.resetPos()) |token| {
+                        if (try self.tokenToEvent(token)) |event| {
+                            return event;
+                        }
+                    } else |_| {
+                        // Failure to reset here still isn't fatal, since we
+                        // may end up getting shorter codepoints which manage
+                        // to complete the current token.
                     }
                 }
 
-                const c = self.reader.readByte() catch |e| switch (e) {
-                    error.EndOfStream => {
-                        try self.scanner.endInput();
-                        return null;
-                    },
-                    else => |other| return other,
+                const c = (try self.nextCodepoint()) orelse {
+                    try self.scanner.endInput();
+                    return null;
                 };
-                self.buffer[self.scanner.pos] = c;
-                if (try self.tokenToEvent(try self.scanner.next(c))) |event| {
+                const c_len = unicode.utf8CodepointSequenceLength(c) catch unreachable;
+                if (self.scanner.pos + c_len >= buffer_size) {
+                    return error.Overflow;
+                }
+                _ = unicode.utf8Encode(c, self.buffer[self.scanner.pos .. self.scanner.pos + c_len]) catch unreachable;
+                if (try self.tokenToEvent(try self.scanner.next(c, c_len))) |event| {
                     return event;
                 }
+            }
+        }
+
+        fn nextCodepoint(self: *Self) !?u21 {
+            var b = self.reader.readByte() catch |e| switch (e) {
+                error.EndOfStream => return null,
+                else => |other| return other,
+            };
+            while (true) {
+                if (try self.decoder.next(b)) |c| {
+                    return c;
+                }
+                b = self.reader.readByte() catch |e| switch (e) {
+                    error.EndOfStream => return error.UnexpectedEndOfInput,
+                    else => |other| return other,
+                };
             }
         }
 
@@ -214,9 +245,13 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type) type {
             switch (token) {
                 .ok => return null,
 
-                // This should eventually be handled, but currently it is not
-                // very useful
-                .xml_declaration => return null,
+                .xml_declaration => |xml_declaration| {
+                    // We may want to return an event for this at some point
+                    if (xml_declaration.encoding) |declared_encoding| {
+                        try self.decoder.adaptTo(self.bufRange(declared_encoding));
+                    }
+                    return null;
+                },
 
                 .element_start => |element_start| {
                     const name = try self.bufRangeDupe(element_start.name);
@@ -353,7 +388,7 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type) type {
                     .element_start => |sub_element_start| try children.append(allocator, .{
                         .element = try self.nextElementNode(allocator, sub_element_start),
                     }),
-                    .element_content => |element_content| try appendContent(&current_text, allocator, element_content.content),
+                    .element_content => |element_content| try appendContent(allocator, &current_text, element_content.content),
                     .element_end => return .{ .name = name, .children = children.items },
                     .attribute_start => |attribute_start| try children.append(allocator, .{
                         .attribute = try self.nextAttributeNode(allocator, attribute_start),
@@ -375,7 +410,7 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type) type {
             var value = ArrayListUnmanaged(u8){};
             while (try self.next()) |event| {
                 const content_event = event.attribute_content;
-                try appendContent(&value, allocator, content_event.content);
+                try appendContent(allocator, &value, content_event.content);
                 if (content_event.final) {
                     return .{ .name = name, .value = value.items };
                 }
@@ -411,12 +446,12 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type) type {
             unreachable;
         }
 
-        fn appendContent(value: *ArrayListUnmanaged(u8), allocator: Allocator, content: Event.Content) !void {
+        fn appendContent(allocator: Allocator, value: *ArrayListUnmanaged(u8), content: Event.Content) !void {
             switch (content) {
                 .text => |text| try value.appendSlice(allocator, text),
                 .entity_ref => |entity_ref| try value.appendSlice(allocator, entities.get(entity_ref).?),
                 .char_ref => |char_ref| {
-                    var buf: [4]u8 = undefined;
+                    var buf: [max_encoded_codepoint_len]u8 = undefined;
                     const len = unicode.utf8Encode(char_ref, &buf) catch unreachable;
                     try value.appendSlice(allocator, buf[0..len]);
                 },
@@ -481,7 +516,7 @@ test "complex document" {
 
 fn testValid(input: []const u8, expected_events: []const Event) !void {
     var input_stream = std.io.fixedBufferStream(input);
-    var input_reader = reader(testing.allocator, input_stream.reader());
+    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{});
     defer input_reader.deinit();
     var i: usize = 0;
     while (try input_reader.next()) |event| : (i += 1) {
@@ -519,7 +554,7 @@ test "complex document nodes" {
         \\
         \\
     );
-    var input_reader = reader(testing.allocator, input_stream.reader());
+    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{});
     defer input_reader.deinit();
 
     // some-pi
