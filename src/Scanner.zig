@@ -172,6 +172,8 @@ pub const Token = union(enum) {
 const State = union(enum) {
     /// Start of document.
     start,
+    /// Start of document after BOM.
+    start_after_bom,
 
     /// Same as unknown_start, but also allows the xml and doctype declarations.
     unknown_document_start,
@@ -358,7 +360,17 @@ pub inline fn next(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token 
 /// in case of success).
 fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
     switch (self.state) {
-        .start => if (isSpace(c)) {
+        .start => if (c == 0xFEFF or isSpace(c)) {
+            self.state = .start_after_bom;
+            return .ok;
+        } else if (c == '<') {
+            self.state = .unknown_document_start;
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .start_after_bom => if (isSpace(c)) {
             return .ok;
         } else if (c == '<') {
             self.state = .unknown_document_start;
@@ -1137,6 +1149,13 @@ inline fn isEncodingChar(c: u21) bool {
     };
 }
 
+test "BOM" {
+    try testValid("\u{FEFF}<element/>", &.{
+        .{ .element_start = .{ .name = .{ .start = 4, .end = 11 } } },
+        .element_end_empty,
+    });
+}
+
 test "empty root element" {
     try testValid("<element/>", &.{
         .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
@@ -1492,6 +1511,7 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
         // States which contain no positional information can be reset at any
         // time with no additional token
         .start,
+        .start_after_bom,
 
         .unknown_document_start,
 
