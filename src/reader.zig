@@ -67,11 +67,12 @@ pub const Event = union(enum) {
     };
 
     pub const Content = union(enum) {
+        /// UTF-8-encoded text.
         text: []const u8,
+        /// A Unicode codepoint.
+        codepoint: u21,
         /// An entity reference (such as `&amp;`). Guaranteed to be a valid entity name.
-        entity_ref: []const u8,
-        /// A character reference (such as `&#32;` or `&#x20;`). Guaranteed to be a valid Unicode codepoint.
-        char_ref: u21,
+        entity: []const u8,
     };
 };
 
@@ -327,14 +328,14 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
         fn convertContent(self: *const Self, content: Token.Content) !Event.Content {
             return switch (content) {
                 .text => |text| .{ .text = self.bufRange(text) },
-                .entity_ref => |entity_ref| content: {
-                    const name = self.bufRange(entity_ref);
+                .codepoint => |codepoint| .{ .codepoint = codepoint },
+                .entity => |entity| content: {
+                    const name = self.bufRange(entity);
                     if (!entities.has(name)) {
                         return error.SyntaxError;
                     }
-                    break :content .{ .entity_ref = name };
+                    break :content .{ .entity = name };
                 },
-                .char_ref => |char_ref| .{ .char_ref = char_ref },
             };
         }
 
@@ -449,12 +450,12 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
         fn appendContent(allocator: Allocator, value: *ArrayListUnmanaged(u8), content: Event.Content) !void {
             switch (content) {
                 .text => |text| try value.appendSlice(allocator, text),
-                .entity_ref => |entity_ref| try value.appendSlice(allocator, entities.get(entity_ref).?),
-                .char_ref => |char_ref| {
+                .codepoint => |codepoint| {
                     var buf: [max_encoded_codepoint_len]u8 = undefined;
-                    const len = unicode.utf8Encode(char_ref, &buf) catch unreachable;
+                    const len = unicode.utf8Encode(codepoint, &buf) catch unreachable;
                     try value.appendSlice(allocator, buf[0..len]);
                 },
+                .entity => |entity| try value.appendSlice(allocator, entities.get(entity).?),
             }
         }
     };
@@ -502,7 +503,7 @@ test "complex document" {
         .{ .element_content = .{ .element_name = "root", .content = .{ .text = "\n  Text content goes here.\n  " } } },
         .{ .element_start = .{ .name = "div" } },
         .{ .element_start = .{ .name = "p" } },
-        .{ .element_content = .{ .element_name = "p", .content = .{ .entity_ref = "amp" } } },
+        .{ .element_content = .{ .element_name = "p", .content = .{ .entity = "amp" } } },
         .{ .element_end = .{ .name = "p" } },
         .{ .element_end = .{ .name = "div" } },
         .{ .element_content = .{ .element_name = "root", .content = .{ .text = "\n" } } },

@@ -150,10 +150,10 @@ pub const Token = union(enum) {
     pub const Content = union(enum) {
         /// Raw text content (does not contain any entities).
         text: Range,
+        /// A Unicode codepoint.
+        codepoint: u21,
         /// An entity reference, such as `&amp;`. The range covers the name (`amp`).
-        entity_ref: Range,
-        /// A character reference, such as `&#32` or `&#x20`. The value is a Unicode codepoint.
-        char_ref: u21,
+        entity: Range,
     };
 };
 
@@ -894,7 +894,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return .ok;
         } else if (c == ';') {
             self.state = .{ .attribute_content = .{ .start = self.pos + len, .quote = state.quote } };
-            return .{ .attribute_content = .{ .content = .{ .entity_ref = .{ .start = state.start, .end = self.pos } } } };
+            return .{ .attribute_content = .{ .content = .{ .entity = .{ .start = state.start, .end = self.pos } } } };
         } else {
             return error.SyntaxError;
         },
@@ -927,7 +927,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             }
         } else if (c == ';' and isChar(state.value)) {
             self.state = .{ .attribute_content = .{ .start = self.pos + len, .quote = state.quote } };
-            return .{ .attribute_content = .{ .content = .{ .char_ref = state.value } } };
+            return .{ .attribute_content = .{ .content = .{ .codepoint = state.value } } };
         } else {
             return error.SyntaxError;
         },
@@ -1014,7 +1014,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return .ok;
         } else if (c == ';') {
             self.state = .{ .content = .{ .start = self.pos + len } };
-            return .{ .element_content = .{ .content = .{ .entity_ref = .{ .start = state.start, .end = self.pos } } } };
+            return .{ .element_content = .{ .content = .{ .entity = .{ .start = state.start, .end = self.pos } } } };
         } else {
             return error.SyntaxError;
         },
@@ -1047,7 +1047,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             }
         } else if (c == ';' and isChar(c)) {
             self.state = .{ .content = .{ .start = self.pos + len } };
-            return .{ .element_content = .{ .content = .{ .char_ref = state.value } } };
+            return .{ .element_content = .{ .content = .{ .codepoint = state.value } } };
         } else {
             return error.SyntaxError;
         },
@@ -1304,16 +1304,16 @@ test "references" {
         .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
         .{ .attribute_start = .{ .name = .{ .start = 9, .end = 18 } } },
         .{ .attribute_content = .{ .content = .{ .text = .{ .start = 20, .end = 25 } } } },
-        .{ .attribute_content = .{ .content = .{ .char_ref = 0x2C } } },
-        .{ .attribute_content = .{ .content = .{ .char_ref = 32 } } },
+        .{ .attribute_content = .{ .content = .{ .codepoint = 0x2C } } },
+        .{ .attribute_content = .{ .content = .{ .codepoint = 32 } } },
         .{ .attribute_content = .{ .content = .{ .text = .{ .start = 36, .end = 42 } } } },
-        .{ .attribute_content = .{ .content = .{ .entity_ref = .{ .start = 43, .end = 46 } } } },
+        .{ .attribute_content = .{ .content = .{ .entity = .{ .start = 43, .end = 46 } } } },
         .{ .attribute_content = .{ .content = .{ .text = .{ .start = 47, .end = 56 } }, .final = true } },
-        .{ .element_content = .{ .content = .{ .entity_ref = .{ .start = 59, .end = 61 } } } },
+        .{ .element_content = .{ .content = .{ .entity = .{ .start = 59, .end = 61 } } } },
         .{ .element_content = .{ .content = .{ .text = .{ .start = 62, .end = 64 } } } },
-        .{ .element_content = .{ .content = .{ .char_ref = 33 } } },
-        .{ .element_content = .{ .content = .{ .char_ref = 0x21 } } },
-        .{ .element_content = .{ .content = .{ .entity_ref = .{ .start = 76, .end = 78 } } } },
+        .{ .element_content = .{ .content = .{ .codepoint = 33 } } },
+        .{ .element_content = .{ .content = .{ .codepoint = 0x21 } } },
+        .{ .element_content = .{ .content = .{ .entity = .{ .start = 76, .end = 78 } } } },
         .{ .element_end = .{ .name = .{ .start = 81, .end = 88 } } },
     });
 }
@@ -1382,7 +1382,7 @@ test "complex document" {
         .{ .element_content = .{ .content = .{ .text = .{ .start = 204, .end = 233 } } } },
         .{ .element_start = .{ .name = .{ .start = 234, .end = 237 } } }, // div
         .{ .element_start = .{ .name = .{ .start = 239, .end = 240 } } }, // p
-        .{ .element_content = .{ .content = .{ .entity_ref = .{ .start = 242, .end = 245 } } } },
+        .{ .element_content = .{ .content = .{ .entity = .{ .start = 242, .end = 245 } } } },
         .{ .element_end = .{ .name = .{ .start = 248, .end = 249 } } }, // /p
         .{ .element_end = .{ .name = .{ .start = 252, .end = 255 } } }, // /div
         .{ .element_content = .{ .content = .{ .text = .{ .start = 256, .end = 257 } } } },

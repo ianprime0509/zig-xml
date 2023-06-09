@@ -54,7 +54,7 @@ fn printEvent(out: anytype, event: xml.Event) !void {
 fn printContent(out: anytype, content: xml.Event.Content) !void {
     switch (content) {
         .text => |text| _ = try out.write(text),
-        .entity_ref => |entity_ref| try out.print("entity_ref: {s}", .{entity_ref}),
-        .char_ref => |char_ref| try out.print("char_ref: {u}", .{char_ref}),
+        .codepoint => |codepoint| try out.print("{u}", .{codepoint}),
+        .entity => |entity| try out.print("entity: {s}", .{entity}),
     }
 }
