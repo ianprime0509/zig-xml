@@ -5,7 +5,8 @@
 //! using the `next` function, then the `endInput` function should be used to
 //! check that the parser is in a valid state for the end of input (e.g. not in
 //! the middle of parsing an element). The tokens returned by the parser
-//! reference the input data using byte positions.
+//! reference the input data using `pos` ranges (the meaning of `pos` depends
+//! on the meaning of the `len` passed to `next`).
 //!
 //! Intentional (permanent) limitations (which can be addressed by
 //! higher-level APIs):

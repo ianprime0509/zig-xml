@@ -99,7 +99,9 @@ pub fn reader(allocator: Allocator, r: anytype, decoder: anytype) Reader(4096, @
 /// which vaguely mimics a StAX pull-based XML parser as found in other
 /// libraries. It performs additional well-formedness checks on the input
 /// which `Scanner` is unable to perform due to its design, such as verifying
-/// that end element tag names match the corresponding start tag names.
+/// that end element tag names match the corresponding start tag names. It also
+/// handles normalization of line endings throughout the input and whitespace
+/// in attribute content, as required by the XML specification.
 ///
 /// An internal buffer is used to store document content read from the reader,
 /// and the size of the buffer (`buffer_size`) limits the maximum length of
