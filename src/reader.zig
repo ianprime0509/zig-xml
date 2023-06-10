@@ -127,6 +127,10 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
         attribute_name: ?[]u8 = null,
         /// The current PI target we're parsing, if any.
         pi_target: ?[]u8 = null,
+        /// Whether the last codepoint read was a carriage return (`\r`).
+        ///
+        /// This is relevant for line break normalization.
+        after_cr: bool = false,
         allocator: Allocator,
 
         const Self = @This();
@@ -227,6 +231,23 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
         }
 
         fn nextCodepoint(self: *Self) !?u21 {
+            var b = (try self.nextCodepointRaw()) orelse return null;
+            if (self.after_cr) {
+                self.after_cr = false;
+                if (b == '\n') {
+                    // \n after \r is ignored because \r was already processed
+                    // as a line ending
+                    b = (try self.nextCodepointRaw()) orelse return null;
+                }
+            }
+            if (b == '\r') {
+                self.after_cr = true;
+                b = '\n';
+            }
+            return if (self.scanner.state == .attribute_content and (b == '\t' or b == '\r' or b == '\n')) ' ' else b;
+        }
+
+        fn nextCodepointRaw(self: *Self) !?u21 {
             var b = self.reader.readByte() catch |e| switch (e) {
                 error.EndOfStream => return null,
                 else => |other| return other,
@@ -459,6 +480,28 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
             }
         }
     };
+}
+
+test "line endings" {
+    try testValid("<root>Line 1\rLine 2\r\nLine 3\nLine 4\n\rLine 6\r\n\rLine 8</root>", &.{
+        .{ .element_start = .{ .name = "root" } },
+        .{ .element_content = .{ .element_name = "root", .content = .{ .text = "Line 1\nLine 2\nLine 3\nLine 4\n\nLine 6\n\nLine 8" } } },
+        .{ .element_end = .{ .name = "root" } },
+    });
+}
+
+test "attribute value normalization" {
+    try testValid("<root attr=' Line 1\rLine 2\r\nLine 3\nLine 4\t\tMore    content\n\rLine 6\r\n\rLine 8 '/>", &.{
+        .{ .element_start = .{ .name = "root" } },
+        .{ .attribute_start = .{ .element_name = "root", .name = "attr" } },
+        .{ .attribute_content = .{
+            .element_name = "root",
+            .attribute_name = "attr",
+            .content = .{ .text = " Line 1 Line 2 Line 3 Line 4  More    content  Line 6  Line 8 " },
+            .final = true,
+        } },
+        .{ .element_end = .{ .name = "root" } },
+    });
 }
 
 test "complex document" {

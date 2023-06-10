@@ -169,7 +169,7 @@ pub const Token = union(enum) {
 /// successive bytes are validated using the `left` slice (e.g. after parsing
 /// "v", left is "ersion", so that when we handle the next character, we can
 /// fail parsing if it is not "e", and then set `left` to "rsion", and so on).
-const State = union(enum) {
+pub const State = union(enum) {
     /// Start of document.
     start,
     /// Start of document after BOM.
