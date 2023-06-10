@@ -582,6 +582,9 @@ fn testValid(input: []const u8, expected_events: []const Event) !void {
 }
 
 test "complex document nodes" {
+    // See https://github.com/ziglang/zig/pull/14981
+    if (true) return error.SkipZigTest;
+
     var input_stream = std.io.fixedBufferStream(
         \\<?xml version="1.0"?>
         \\<?some-pi?>
