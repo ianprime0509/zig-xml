@@ -1,10 +1,13 @@
 const std = @import("std");
 const fmt = std.fmt;
+const mem = std.mem;
 const testing = std.testing;
 const unicode = std.unicode;
-const Allocator = std.mem.Allocator;
+const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const ComptimeStringMap = std.ComptimeStringMap;
+const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 const encoding = @import("encoding.zig");
 const xml_node = @import("node.zig");
 const Node = xml_node.Node;
@@ -80,13 +83,108 @@ pub const Event = union(enum) {
 ///
 /// Until DTDs are understood and parsed, these are the only named entities
 /// supported by this parser.
-pub const entities = std.ComptimeStringMap([]const u8, .{
+pub const entities = ComptimeStringMap([]const u8, .{
     .{ "amp", "&" },
     .{ "lt", "<" },
     .{ "gt", ">" },
     .{ "apos", "'" },
     .{ "quot", "\"" },
 });
+
+const xml_ns = "http://www.w3.org/XML/1998/namespace";
+const xmlns_ns = "http://www.w3.org/2000/xmlns/";
+
+const predefined_ns_prefixes = ComptimeStringMap([]const u8, .{
+    .{ "xml", xml_ns },
+    .{ "xmlns", xmlns_ns },
+});
+
+/// A context for namespace information in a document.
+///
+/// The context maintains a hierarchy of namespace scopes. Initially, there is
+/// no active scope (corresponding to the beginning of a document, before the
+/// start of the root element).
+pub const NamespaceContext = struct {
+    scopes: ArrayListUnmanaged(StringHashMapUnmanaged([]const u8)) = .{},
+
+    pub fn deinit(self: *NamespaceContext, allocator: Allocator) void {
+        while (self.scopes.items.len > 0) {
+            self.endScope(allocator);
+        }
+        self.scopes.deinit(allocator);
+        self.* = undefined;
+    }
+
+    /// Starts a new scope.
+    pub fn startScope(self: *NamespaceContext, allocator: Allocator) !void {
+        try self.scopes.append(allocator, .{});
+    }
+
+    /// Ends the current scope.
+    ///
+    /// Only valid if there is a current scope.
+    pub fn endScope(self: *NamespaceContext, allocator: Allocator) void {
+        var bindings = self.scopes.pop();
+        var iter = bindings.iterator();
+        while (iter.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        bindings.deinit(allocator);
+    }
+
+    /// Binds a prefix in the current scope.
+    ///
+    /// Only valid if there is a current scope.
+    pub fn bind(self: *NamespaceContext, allocator: Allocator, prefix: []const u8, uri: []const u8) !void {
+        // TODO: forbid undeclaring prefixes in XML 1.0 documents
+        // TODO: validate that uri is a valid URI
+        var bindings = &self.scopes.items[self.scopes.items.len - 1];
+        const key = try allocator.dupe(u8, prefix);
+        errdefer allocator.free(key);
+        const value = try allocator.dupe(u8, uri);
+        errdefer allocator.free(value);
+        try bindings.put(allocator, key, value);
+    }
+
+    /// Returns the URI, if any, bound to the given prefix.
+    pub fn getUri(self: NamespaceContext, prefix: []const u8) ?[]const u8 {
+        if (predefined_ns_prefixes.get(prefix)) |uri| {
+            return uri;
+        }
+        return for (0..self.scopes.items.len) |i| {
+            if (self.scopes.items[self.scopes.items.len - i - 1].get(prefix)) |uri| {
+                break if (uri.len > 0) uri else null;
+            }
+        } else null;
+    }
+
+    /// Parses a possibly prefixed name and returns the corresponding `QName`.
+    ///
+    /// `use_default_ns` specifies if the default namespace (if any) should be
+    /// implied for the given name if it is unprefixed. This is appropriate for
+    /// element names but not attribute names, per the namespaces spec.
+    pub fn parseName(self: NamespaceContext, name: []const u8, use_default_ns: bool) QName {
+        // TODO: validate the parts of the name
+        if (mem.indexOfScalar(u8, name, ':')) |sep_pos| {
+            const prefix = name[0..sep_pos];
+            const ns = self.getUri(prefix);
+            const local = name[sep_pos + 1 ..];
+            return .{ .prefix = prefix, .ns = ns, .local = local };
+        } else if (use_default_ns) {
+            return .{ .ns = self.getUri(""), .local = name };
+        } else {
+            return .{ .local = name };
+        }
+    }
+};
+
+/// A qualified name.
+pub const QName = struct {
+    prefix: ?[]const u8 = null,
+    ns: ?[]const u8 = null,
+    local: []const u8,
+};
 
 /// Wraps a `std.io.Reader` in a `Reader` with the default buffer size (4096).
 pub fn reader(allocator: Allocator, r: anytype, decoder: anytype) Reader(4096, @TypeOf(r), @TypeOf(decoder)) {
@@ -111,6 +209,27 @@ pub fn reader(allocator: Allocator, r: anytype, decoder: anytype) Reader(4096, @
 ///
 /// An allocator is also used to keep track of internal state, such as a stack
 /// of containing element names.
+///
+/// # Namespace support
+///
+/// XML namespaces are supported using `NamespaceContext`. However, note that,
+/// due to the streaming nature of this parser, it is not generally possible to
+/// correctly resolve namespaces for an element and its attributes until all
+/// attributes have been parsed. For example, consider the following XML
+/// snippet:
+///
+/// ```xml
+/// <element xmlns="http://example.com/v1" />
+/// ```
+///
+/// The namespace URI associated with `element` should be
+/// `http://example.com/v1` due to the `xmlns` attribute, but this will not be
+/// known at the time of the `element_start` event because no attributes will
+/// have been parsed yet.
+///
+/// Due to this potential footgun, `Event` does not expose any namespace
+/// information by itself. One solution is to parse into a `Node`, which
+/// does expose namespace information.
 pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime DecoderType: type) type {
     return struct {
         scanner: Scanner,
@@ -133,6 +252,11 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
         ///
         /// This is relevant for line break normalization.
         after_cr: bool = false,
+        /// The namespace context of the reader.
+        namespace_context: NamespaceContext = .{},
+        current_prefix: ?[]const u8 = null,
+        current_uri: ArrayListUnmanaged(u8) = .{},
+        after_element_end: bool = false,
         allocator: Allocator,
 
         const Self = @This();
@@ -171,6 +295,10 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
                 self.allocator.free(pi_target);
             }
 
+            self.namespace_context.deinit(self.allocator);
+
+            self.current_uri.deinit(self.allocator);
+
             self.* = undefined;
         }
 
@@ -179,6 +307,14 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
         /// The returned event is only valid until the next call to `next`,
         /// `nextNode`, or `deinit`.
         pub fn next(self: *Self) Error!?Event {
+            if (self.after_element_end) {
+                // The namespace scope of an element must remain valid through
+                // the end of the element, so we cannot end it until just after
+                // we're done with the end event.
+                self.namespace_context.endScope(self.allocator);
+                self.after_element_end = false;
+            }
+
             if (self.last_element_name) |last_element_name| {
                 // last_element_name is only a holding area to return a valid
                 // element_end event for an empty element. Since events are
@@ -278,6 +414,7 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
                 },
 
                 .element_start => |element_start| {
+                    try self.namespace_context.startScope(self.allocator);
                     const name = try self.bufRangeDupe(element_start.name);
                     errdefer self.allocator.free(name);
                     try self.element_names.append(self.allocator, name);
@@ -290,16 +427,18 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
                 } },
 
                 .element_end => |element_end| {
+                    self.after_element_end = true;
                     const name = self.bufRange(element_end.name);
                     const current_element_name = self.element_names.pop();
                     defer self.allocator.free(current_element_name);
-                    if (!std.mem.eql(u8, name, current_element_name)) {
+                    if (!mem.eql(u8, name, current_element_name)) {
                         return error.SyntaxError;
                     }
                     return .{ .element_end = .{ .name = name } };
                 },
 
                 .element_end_empty => {
+                    self.after_element_end = true;
                     const current_element_name = self.element_names.pop();
                     self.last_element_name = current_element_name;
                     return .{ .element_end = .{ .name = current_element_name } };
@@ -310,19 +449,42 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
                         self.allocator.free(attribute_name);
                     }
                     const name = try self.bufRangeDupe(attribute_start.name);
+                    errdefer self.allocator.free(name);
                     self.attribute_name = name;
+
+                    if (mem.eql(u8, name, "xmlns")) {
+                        self.current_prefix = "";
+                    } else if (mem.startsWith(u8, name, "xmlns:")) {
+                        self.current_prefix = name["xmlns:".len..];
+                    } else {
+                        self.current_prefix = null;
+                    }
+
                     return .{ .attribute_start = .{
                         .element_name = self.element_names.getLast(),
                         .name = name,
                     } };
                 },
 
-                .attribute_content => |attribute_content| return .{ .attribute_content = .{
-                    .element_name = self.element_names.getLast(),
-                    .attribute_name = self.attribute_name.?,
-                    .content = try self.convertContent(attribute_content.content),
-                    .final = attribute_content.final,
-                } },
+                .attribute_content => |attribute_content| {
+                    const content = try self.convertContent(attribute_content.content);
+
+                    if (self.current_prefix) |current_prefix| {
+                        try appendContent(self.allocator, &self.current_uri, content);
+                        if (attribute_content.final) {
+                            try self.namespace_context.bind(self.allocator, current_prefix, self.current_uri.items);
+                            self.current_prefix = null;
+                            self.current_uri.clearAndFree(self.allocator);
+                        }
+                    }
+
+                    return .{ .attribute_content = .{
+                        .element_name = self.element_names.getLast(),
+                        .attribute_name = self.attribute_name.?,
+                        .content = content,
+                        .final = attribute_content.final,
+                    } };
+                },
 
                 .comment_start => return .comment_start,
 
@@ -392,7 +554,7 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
             const a = arena.allocator();
             const node: Node = switch (start_event) {
                 .element_start => |element_start| .{ .element = try self.nextElementNode(a, element_start) },
-                .attribute_start => |attribute_start| .{ .attribute = try self.nextAttributeNode(a, attribute_start) },
+                .attribute_start => |attribute_start| .{ .attribute = try self.nextAttributeNode(a, attribute_start, true) },
                 .comment_start => .{ .comment = try self.nextCommentNode(a) },
                 .pi_start => |pi_start| .{ .pi = try self.nextPiNode(a, pi_start) },
                 else => unreachable,
@@ -413,9 +575,21 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
                         .element = try self.nextElementNode(allocator, sub_element_start),
                     }),
                     .element_content => |element_content| try appendContent(allocator, &current_text, element_content.content),
-                    .element_end => return .{ .name = name, .children = children.items },
+                    .element_end => {
+                        // Until we have parsed all attributes, we cannot fully
+                        // process namespace information for the current
+                        // element and its attributes, so we just do this
+                        // processing when seeing the end tag
+                        const qname = try self.parseQNameOwned(allocator, name, true);
+                        for (children.items) |*child| {
+                            if (child.* == .attribute) {
+                                child.attribute.name = try self.parseQNameOwned(allocator, child.attribute.name.local, false);
+                            }
+                        }
+                        return .{ .name = qname, .children = children.items };
+                    },
                     .attribute_start => |attribute_start| try children.append(allocator, .{
-                        .attribute = try self.nextAttributeNode(allocator, attribute_start),
+                        .attribute = try self.nextAttributeNode(allocator, attribute_start, false),
                     }),
                     .comment_start => try children.append(allocator, .{
                         .comment = try self.nextCommentNode(allocator),
@@ -429,14 +603,15 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
             unreachable;
         }
 
-        fn nextAttributeNode(self: *Self, allocator: Allocator, attribute_start: Event.AttributeStart) !Node.Attribute {
+        fn nextAttributeNode(self: *Self, allocator: Allocator, attribute_start: Event.AttributeStart, parse_qname: bool) !Node.Attribute {
             const name = try allocator.dupe(u8, attribute_start.name);
+            const qname = if (parse_qname) try self.parseQNameOwned(allocator, name, false) else QName{ .local = name };
             var value = ArrayListUnmanaged(u8){};
             while (try self.next()) |event| {
                 const content_event = event.attribute_content;
                 try appendContent(allocator, &value, content_event.content);
                 if (content_event.final) {
-                    return .{ .name = name, .value = value.items };
+                    return .{ .name = qname, .value = value.items };
                 }
             }
             unreachable;
@@ -480,6 +655,19 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
                 },
                 .entity => |entity| try value.appendSlice(allocator, entities.get(entity).?),
             }
+        }
+
+        /// Parses a QName and additionally copies the namespace URI so it
+        /// remains valid even after the namespace context is freed.
+        ///
+        /// The prefix and local parts of the name are slices of `name` so they
+        /// are already owned by the arena.
+        fn parseQNameOwned(self: Self, allocator: Allocator, name: []const u8, use_default_ns: bool) !QName {
+            var qname = self.namespace_context.parseName(name, use_default_ns);
+            if (qname.ns) |*ns| {
+                ns.* = try allocator.dupe(u8, ns.*);
+            }
+            return qname;
         }
     };
 }
@@ -639,19 +827,19 @@ test "complex document nodes" {
         try testing.expect(event != null and event.? == .element_start);
         var node = try input_reader.nextNode(testing.allocator, event.?);
         defer node.deinit();
-        try testing.expectEqualDeep(Node{ .element = .{ .name = "root", .children = &.{
+        try testing.expectEqualDeep(Node{ .element = .{ .name = .{ .local = "root" }, .children = &.{
             .{ .text = .{ .content = "\n  " } },
-            .{ .element = .{ .name = "p", .children = &.{
-                .{ .attribute = .{ .name = "class", .value = "test" } },
+            .{ .element = .{ .name = .{ .local = "p" }, .children = &.{
+                .{ .attribute = .{ .name = .{ .local = "class" }, .value = "test" } },
                 .{ .text = .{ .content = "Hello, world!" } },
             } } },
             .{ .text = .{ .content = "\n  " } },
-            .{ .element = .{ .name = "line", .children = &.{} } },
+            .{ .element = .{ .name = .{ .local = "line" }, .children = &.{} } },
             .{ .text = .{ .content = "\n  " } },
             .{ .pi = .{ .target = "another-pi", .content = "" } },
             .{ .text = .{ .content = "\n  Text content goes here.\n  " } },
-            .{ .element = .{ .name = "div", .children = &.{
-                .{ .element = .{ .name = "p", .children = &.{
+            .{ .element = .{ .name = .{ .local = "div" }, .children = &.{
+                .{ .element = .{ .name = .{ .local = "p" }, .children = &.{
                     .{ .text = .{ .content = "&" } },
                 } } },
             } } },
@@ -678,4 +866,46 @@ test "complex document nodes" {
     }
 
     try testing.expect(try input_reader.next() == null);
+}
+
+test "namespace handling" {
+    // See https://github.com/ziglang/zig/pull/14981
+    if (true) return error.SkipZigTest;
+
+    var input_stream = std.io.fixedBufferStream(
+        \\<a:root xmlns:a="urn:1">
+        \\  <child xmlns="urn:2" xmlns:b="urn:3" attr="value">
+        \\    <b:child xmlns:a="urn:4" b:attr="value">
+        \\      <a:child />
+        \\    </b:child>
+        \\  </child>
+        \\</a:root>
+    );
+    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{});
+    defer input_reader.deinit();
+
+    var event = try input_reader.next();
+    try testing.expect(event != null and event.? == .element_start);
+
+    var node = try input_reader.nextNode(testing.allocator, event.?);
+    defer node.deinit();
+    try testing.expectEqualDeep(Node{ .element = .{ .name = .{ .prefix = "a", .ns = "urn:1", .local = "root" }, .children = &.{
+        .{ .attribute = .{ .name = .{ .prefix = "xmlns", .ns = xmlns_ns, .local = "a" }, .value = "urn:1" } },
+        .{ .text = .{ .content = "\n  " } },
+        .{ .element = .{ .name = .{ .ns = "urn:2", .local = "child" }, .children = &.{
+            .{ .attribute = .{ .name = .{ .local = "xmlns" }, .value = "urn:2" } },
+            .{ .attribute = .{ .name = .{ .prefix = "xmlns", .ns = xmlns_ns, .local = "b" }, .value = "urn:3" } },
+            .{ .attribute = .{ .name = .{ .local = "attr" }, .value = "value" } },
+            .{ .text = .{ .content = "\n    " } },
+            .{ .element = .{ .name = .{ .prefix = "b", .ns = "urn:3", .local = "child" }, .children = &.{
+                .{ .attribute = .{ .name = .{ .prefix = "xmlns", .ns = xmlns_ns, .local = "a" }, .value = "urn:4" } },
+                .{ .attribute = .{ .name = .{ .prefix = "b", .ns = "urn:3", .local = "attr" }, .value = "value" } },
+                .{ .text = .{ .content = "\n      " } },
+                .{ .element = .{ .name = .{ .prefix = "a", .ns = "urn:4", .local = "child" } } },
+                .{ .text = .{ .content = "\n    " } },
+            } } },
+            .{ .text = .{ .content = "\n  " } },
+        } } },
+        .{ .text = .{ .content = "\n" } },
+    } } }, node.node);
 }
