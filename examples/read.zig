@@ -31,30 +31,15 @@ pub fn main() !void {
 
 fn printEvent(out: anytype, event: xml.Event) !void {
     switch (event) {
-        .element_start => |element_start| try out.print("<{s}\n", .{element_start.name}),
-        .element_content => |element_content| {
-            try out.print(".{s} ", .{element_content.element_name});
-            try printContent(out, element_content.content);
-            _ = try out.write("\n");
+        .element_start => |element_start| {
+            try out.print("<{?s}({?s}):{s}\n", .{ element_start.name.prefix, element_start.name.ns, element_start.name.local });
+            for (element_start.attributes) |attr| {
+                try out.print("  @{?s}({?s}):{s}={s}\n", .{ attr.name.prefix, attr.name.ns, attr.name.local, attr.value });
+            }
         },
-        .element_end => |element_end| try out.print("/{s}\n", .{element_end.name}),
-        .attribute_start => |attribute_start| try out.print("*{s} ={s}\n", .{ attribute_start.element_name, attribute_start.name }),
-        .attribute_content => |attribute_content| {
-            try out.print("*{s} .{s} ", .{ attribute_content.element_name, attribute_content.attribute_name });
-            try printContent(out, attribute_content.content);
-            _ = try out.write("\n");
-        },
-        .comment_start => _ = try out.write("!<\n"),
-        .comment_content => |comment_content| try out.print("!. {s}\n", .{comment_content.content}),
-        .pi_start => |pi_start| try out.print("?<{s}\n", .{pi_start.target}),
-        .pi_content => |pi_content| try out.print("?.{s} {s}\n", .{ pi_content.pi_target, pi_content.content }),
-    }
-}
-
-fn printContent(out: anytype, content: xml.Event.Content) !void {
-    switch (content) {
-        .text => |text| _ = try out.write(text),
-        .codepoint => |codepoint| try out.print("{u}", .{codepoint}),
-        .entity => |entity| try out.print("entity: {s}", .{entity}),
+        .element_content => |element_content| try out.print("  {s}\n", .{element_content.content}),
+        .element_end => |element_end| try out.print("/{?s}({?s}):{s}\n", .{ element_end.name.prefix, element_end.name.ns, element_end.name.local }),
+        .comment => |comment| try out.print("<!--{s}\n", .{comment.content}),
+        .pi => |pi| try out.print("<?{s} {s}\n", .{ pi.target, pi.content }),
     }
 }

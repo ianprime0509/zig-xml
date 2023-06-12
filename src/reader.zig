@@ -7,75 +7,66 @@ const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const ComptimeStringMap = std.ComptimeStringMap;
+const StringArrayHashMapUnmanaged = std.StringArrayHashMapUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 const encoding = @import("encoding.zig");
-const xml_node = @import("node.zig");
-const Node = xml_node.Node;
-const OwnedNode = xml_node.OwnedNode;
+const Node = @import("node.zig").Node;
+const OwnedValue = @import("node.zig").OwnedValue;
 const Scanner = @import("Scanner.zig");
-const Token = Scanner.Token;
+const Token = @import("token_reader.zig").Token;
+const TokenReader = @import("token_reader.zig").TokenReader;
 
 const max_encoded_codepoint_len = 4;
+
+/// A qualified name.
+pub const QName = struct {
+    prefix: ?[]const u8 = null,
+    ns: ?[]const u8 = null,
+    local: []const u8,
+
+    fn clone(self: QName, allocator: Allocator) !QName {
+        const prefix = if (self.prefix) |prefix| try allocator.dupe(u8, prefix) else null;
+        errdefer if (prefix) |p| allocator.free(p);
+        const ns = if (self.ns) |ns| try allocator.dupe(u8, ns) else null;
+        errdefer if (ns) |n| allocator.free(n);
+        const local = try allocator.dupe(u8, self.local);
+        return .{ .prefix = prefix, .ns = ns, .local = local };
+    }
+};
 
 /// An event emitted by a reader.
 pub const Event = union(enum) {
     element_start: ElementStart,
     element_content: ElementContent,
     element_end: ElementEnd,
-    attribute_start: AttributeStart,
-    attribute_content: AttributeContent,
-    comment_start,
-    comment_content: CommentContent,
-    pi_start: PiStart,
-    pi_content: PiContent,
+    comment: Comment,
+    pi: Pi,
 
     pub const ElementStart = struct {
-        name: []const u8,
+        name: QName,
+        attributes: []const Attribute = &.{},
+    };
+
+    pub const Attribute = struct {
+        name: QName,
+        value: []const u8,
     };
 
     pub const ElementContent = struct {
-        element_name: []const u8,
-        content: Content,
+        content: []const u8,
     };
 
     pub const ElementEnd = struct {
-        name: []const u8,
+        name: QName,
     };
 
-    pub const AttributeStart = struct {
-        element_name: []const u8,
-        name: []const u8,
-    };
-
-    pub const AttributeContent = struct {
-        element_name: []const u8,
-        attribute_name: []const u8,
-        content: Content,
-        final: bool = false,
-    };
-
-    pub const CommentContent = struct {
+    pub const Comment = struct {
         content: []const u8,
-        final: bool = false,
     };
 
-    pub const PiStart = struct {
+    pub const Pi = struct {
         target: []const u8,
-    };
-
-    pub const PiContent = struct {
-        pi_target: []const u8,
         content: []const u8,
-        final: bool = false,
-    };
-
-    pub const Content = union(enum) {
-        /// UTF-8-encoded text.
-        text: []const u8,
-        /// A Unicode codepoint.
-        codepoint: u21,
-        /// An entity reference (such as `&amp;`). Guaranteed to be a valid entity name.
-        entity: []const u8,
     };
 };
 
@@ -83,7 +74,7 @@ pub const Event = union(enum) {
 ///
 /// Until DTDs are understood and parsed, these are the only named entities
 /// supported by this parser.
-pub const entities = ComptimeStringMap([]const u8, .{
+const entities = ComptimeStringMap([]const u8, .{
     .{ "amp", "&" },
     .{ "lt", "<" },
     .{ "gt", ">" },
@@ -104,7 +95,7 @@ const predefined_ns_prefixes = ComptimeStringMap([]const u8, .{
 /// The context maintains a hierarchy of namespace scopes. Initially, there is
 /// no active scope (corresponding to the beginning of a document, before the
 /// start of the root element).
-pub const NamespaceContext = struct {
+const NamespaceContext = struct {
     scopes: ArrayListUnmanaged(StringHashMapUnmanaged([]const u8)) = .{},
 
     pub fn deinit(self: *NamespaceContext, allocator: Allocator) void {
@@ -179,100 +170,56 @@ pub const NamespaceContext = struct {
     }
 };
 
-/// A qualified name.
-pub const QName = struct {
-    prefix: ?[]const u8 = null,
-    ns: ?[]const u8 = null,
-    local: []const u8,
-};
-
-/// Wraps a `std.io.Reader` in a `Reader` with the default buffer size (4096).
-pub fn reader(allocator: Allocator, r: anytype, decoder: anytype) Reader(4096, @TypeOf(r), @TypeOf(decoder)) {
-    return Reader(4096, @TypeOf(r), @TypeOf(decoder)).init(allocator, r, decoder);
+pub fn reader(allocator: Allocator, r: anytype, decoder: anytype) Reader(TokenReader(4096, @TypeOf(r), @TypeOf(decoder))) {
+    const TokenReaderType = TokenReader(4096, @TypeOf(r), @TypeOf(decoder));
+    return Reader(TokenReaderType).init(allocator, TokenReaderType.init(r, decoder));
 }
 
-/// A streaming XML parser wrapping a `std.io.Reader`.
+/// A streaming, pull-based XML parser wrapping a `std.io.Reader`.
 ///
-/// This parser is a higher-level wrapper around a `Scanner`, providing an API
-/// which vaguely mimics a StAX pull-based XML parser as found in other
-/// libraries. It performs additional well-formedness checks on the input
-/// which `Scanner` is unable to perform due to its design, such as verifying
-/// that end element tag names match the corresponding start tag names. It also
-/// handles normalization of line endings throughout the input and whitespace
-/// in attribute content, as required by the XML specification.
-///
-/// An internal buffer is used to store document content read from the reader,
-/// and the size of the buffer (`buffer_size`) limits the maximum length of
-/// names (element names, attribute names, PI targets, entity names, etc.) and
-/// content events (but not the total length of content, since multiple content
-/// events can be emitted for a single containing context).
-///
-/// An allocator is also used to keep track of internal state, such as a stack
-/// of containing element names.
-///
-/// # Namespace support
-///
-/// XML namespaces are supported using `NamespaceContext`. However, note that,
-/// due to the streaming nature of this parser, it is not generally possible to
-/// correctly resolve namespaces for an element and its attributes until all
-/// attributes have been parsed. For example, consider the following XML
-/// snippet:
-///
-/// ```xml
-/// <element xmlns="http://example.com/v1" />
-/// ```
-///
-/// The namespace URI associated with `element` should be
-/// `http://example.com/v1` due to the `xmlns` attribute, but this will not be
-/// known at the time of the `element_start` event because no attributes will
-/// have been parsed yet.
-///
-/// Due to this potential footgun, `Event` does not expose any namespace
-/// information by itself. One solution is to parse into a `Node`, which
-/// does expose namespace information.
-pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime DecoderType: type) type {
+/// This parser behaves similarly to Go's `encoding/xml` package. It is a
+/// higher-level abstraction over a `TokenReader` which uses an internal
+/// allocator to keep track of additional context. It is intended to be a fully
+/// conformant non-validating parser according to the XML 1.0 specification,
+/// unlike the lower-level parsers in this library which sacrifice some
+/// well-formedness checks for efficiency.
+/// (TODO: this implementation is definitely not fully conformant yet; make it so)
+pub fn Reader(comptime TokenReaderType: type) type {
     return struct {
-        scanner: Scanner,
-        reader: ReaderType,
-        decoder: DecoderType,
-        /// Buffered content read by the reader for the current event.
-        ///
-        /// Events may reference this buffer via slices. The contents of the
-        /// buffer (up until `scanner.pos`) are always valid UTF-8.
-        buffer: [buffer_size]u8 = undefined,
+        token_reader: TokenReaderType,
         /// A stack of element names enclosing the current context.
         element_names: ArrayListUnmanaged([]u8) = .{},
-        /// The last element name, if we just encountered the end of an empty element.
-        last_element_name: ?[]u8 = null,
-        /// The current attribute name we're parsing, if any.
-        attribute_name: ?[]u8 = null,
-        /// The current PI target we're parsing, if any.
-        pi_target: ?[]u8 = null,
-        /// Whether the last codepoint read was a carriage return (`\r`).
-        ///
-        /// This is relevant for line break normalization.
-        after_cr: bool = false,
         /// The namespace context of the reader.
         namespace_context: NamespaceContext = .{},
-        current_prefix: ?[]const u8 = null,
-        current_uri: ArrayListUnmanaged(u8) = .{},
-        after_element_end: bool = false,
+        /// A pending token which has been read but has not yet been handled as
+        /// part of an event.
+        pending_token: ?Token = null,
+        /// A buffer for storing encoded Unicode codepoint data.
+        codepoint_buf: [max_encoded_codepoint_len]u8 = undefined,
+        /// A "buffer" for handling the contents of the next pending event.
+        pending_event: union(enum) {
+            none,
+            element_start: struct {
+                name: []const u8,
+                attributes: StringArrayHashMapUnmanaged(struct { name: []const u8, value: []const u8 }) = .{},
+                current_attribute: struct { name: []const u8, value: ArrayListUnmanaged(u8) = .{} } = undefined,
+            },
+            comment: struct { content: ArrayListUnmanaged(u8) = .{} },
+            pi: struct { target: []const u8, content: ArrayListUnmanaged(u8) = .{} },
+        } = .none,
+        /// An arena to store memory for `pending_event` (and the event after
+        /// it's returned).
+        event_arena: ArenaAllocator,
         allocator: Allocator,
 
         const Self = @This();
 
-        pub const Error = error{
-            InvalidEncoding,
-            Overflow,
-            SyntaxError,
-            UnexpectedEndOfInput,
-        } || Allocator.Error || ReaderType.Error || DecoderType.Error;
+        pub const Error = Allocator.Error || TokenReaderType.Error;
 
-        pub fn init(allocator: Allocator, r: ReaderType, decoder: DecoderType) Self {
+        pub fn init(allocator: Allocator, token_reader: TokenReaderType) Self {
             return .{
-                .scanner = Scanner{},
-                .reader = r,
-                .decoder = decoder,
+                .token_reader = token_reader,
+                .event_arena = ArenaAllocator.init(allocator),
                 .allocator = allocator,
             };
         }
@@ -282,416 +229,209 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
                 self.allocator.free(name);
             }
             self.element_names.deinit(self.allocator);
-
-            if (self.last_element_name) |last_element_name| {
-                self.allocator.free(last_element_name);
-            }
-
-            if (self.attribute_name) |attribute_name| {
-                self.allocator.free(attribute_name);
-            }
-
-            if (self.pi_target) |pi_target| {
-                self.allocator.free(pi_target);
-            }
-
             self.namespace_context.deinit(self.allocator);
-
-            self.current_uri.deinit(self.allocator);
-
+            self.event_arena.deinit();
             self.* = undefined;
         }
 
         /// Returns the next event from the input.
         ///
-        /// The returned event is only valid until the next call to `next`,
-        /// `nextNode`, or `deinit`.
+        /// The returned event is only valid until the next reader operation.
         pub fn next(self: *Self) Error!?Event {
-            if (self.after_element_end) {
-                // The namespace scope of an element must remain valid through
-                // the end of the element, so we cannot end it until just after
-                // we're done with the end event.
-                self.namespace_context.endScope(self.allocator);
-                self.after_element_end = false;
-            }
-
-            if (self.last_element_name) |last_element_name| {
-                // last_element_name is only a holding area to return a valid
-                // element_end event for an empty element. Since events are
-                // invalidated after the next call to next, we no longer need
-                // it.
-                self.allocator.free(last_element_name);
-                self.last_element_name = null;
-            }
-
-            if (self.scanner.pos > 0) {
-                // If the scanner position is > 0, that means we emitted an event
-                // on the last call to next, and should try to reset the
-                // position again in an effort to not run out of buffer space
-                // (ideally, the scanner should be resettable after every token,
-                // but we do not depend on this).
-                if (self.scanner.resetPos()) |token| {
-                    if (try self.tokenToEvent(token)) |event| {
-                        return event;
-                    }
-                } else |_| {
-                    // Failure to reset isn't fatal (yet); we can still try to
-                    // complete the token below
-                }
-            }
-
+            _ = self.event_arena.reset(.retain_capacity);
+            const event_allocator = self.event_arena.allocator();
             while (true) {
-                if (self.scanner.pos + max_encoded_codepoint_len >= buffer_size) {
-                    if (self.scanner.resetPos()) |token| {
-                        if (try self.tokenToEvent(token)) |event| {
+                const token = (try self.nextToken()) orelse return null;
+                switch (token) {
+                    .xml_declaration => {
+                        // TODO: do something with this information, e.g.
+                        // changing behavior based on the XML version
+                    },
+                    .element_start => |element_start| {
+                        if (try self.finalizePendingEvent()) |event| {
+                            self.pending_token = token;
                             return event;
                         }
-                    } else |_| {
-                        // Failure to reset here still isn't fatal, since we
-                        // may end up getting shorter codepoints which manage
-                        // to complete the current token.
-                    }
-                }
-
-                const c = (try self.nextCodepoint()) orelse {
-                    try self.scanner.endInput();
-                    return null;
-                };
-                const c_len = unicode.utf8CodepointSequenceLength(c) catch unreachable;
-                if (self.scanner.pos + c_len >= buffer_size) {
-                    return error.Overflow;
-                }
-                _ = unicode.utf8Encode(c, self.buffer[self.scanner.pos .. self.scanner.pos + c_len]) catch unreachable;
-                if (try self.tokenToEvent(try self.scanner.next(c, c_len))) |event| {
-                    return event;
-                }
-            }
-        }
-
-        fn nextCodepoint(self: *Self) !?u21 {
-            var b = (try self.nextCodepointRaw()) orelse return null;
-            if (self.after_cr) {
-                self.after_cr = false;
-                if (b == '\n') {
-                    // \n after \r is ignored because \r was already processed
-                    // as a line ending
-                    b = (try self.nextCodepointRaw()) orelse return null;
-                }
-            }
-            if (b == '\r') {
-                self.after_cr = true;
-                b = '\n';
-            }
-            return if (self.scanner.state == .attribute_content and (b == '\t' or b == '\r' or b == '\n')) ' ' else b;
-        }
-
-        fn nextCodepointRaw(self: *Self) !?u21 {
-            var b = self.reader.readByte() catch |e| switch (e) {
-                error.EndOfStream => return null,
-                else => |other| return other,
-            };
-            while (true) {
-                if (try self.decoder.next(b)) |c| {
-                    return c;
-                }
-                b = self.reader.readByte() catch |e| switch (e) {
-                    error.EndOfStream => return error.UnexpectedEndOfInput,
-                    else => |other| return other,
-                };
-            }
-        }
-
-        fn tokenToEvent(self: *Self, token: Token) !?Event {
-            switch (token) {
-                .ok => return null,
-
-                .xml_declaration => |xml_declaration| {
-                    // We may want to return an event for this at some point
-                    if (xml_declaration.encoding) |declared_encoding| {
-                        try self.decoder.adaptTo(self.bufRange(declared_encoding));
-                    }
-                    return null;
-                },
-
-                .element_start => |element_start| {
-                    try self.namespace_context.startScope(self.allocator);
-                    const name = try self.bufRangeDupe(element_start.name);
-                    errdefer self.allocator.free(name);
-                    try self.element_names.append(self.allocator, name);
-                    return .{ .element_start = .{ .name = name } };
-                },
-
-                .element_content => |element_content| return .{ .element_content = .{
-                    .element_name = self.element_names.getLast(),
-                    .content = try self.convertContent(element_content.content),
-                } },
-
-                .element_end => |element_end| {
-                    self.after_element_end = true;
-                    const name = self.bufRange(element_end.name);
-                    const current_element_name = self.element_names.pop();
-                    defer self.allocator.free(current_element_name);
-                    if (!mem.eql(u8, name, current_element_name)) {
-                        return error.SyntaxError;
-                    }
-                    return .{ .element_end = .{ .name = name } };
-                },
-
-                .element_end_empty => {
-                    self.after_element_end = true;
-                    const current_element_name = self.element_names.pop();
-                    self.last_element_name = current_element_name;
-                    return .{ .element_end = .{ .name = current_element_name } };
-                },
-
-                .attribute_start => |attribute_start| {
-                    if (self.attribute_name) |attribute_name| {
-                        self.allocator.free(attribute_name);
-                    }
-                    const name = try self.bufRangeDupe(attribute_start.name);
-                    errdefer self.allocator.free(name);
-                    self.attribute_name = name;
-
-                    if (mem.eql(u8, name, "xmlns")) {
-                        self.current_prefix = "";
-                    } else if (mem.startsWith(u8, name, "xmlns:")) {
-                        self.current_prefix = name["xmlns:".len..];
-                    } else {
-                        self.current_prefix = null;
-                    }
-
-                    return .{ .attribute_start = .{
-                        .element_name = self.element_names.getLast(),
-                        .name = name,
-                    } };
-                },
-
-                .attribute_content => |attribute_content| {
-                    const content = try self.convertContent(attribute_content.content);
-
-                    if (self.current_prefix) |current_prefix| {
-                        try appendContent(self.allocator, &self.current_uri, content);
+                        const name = try self.allocator.dupe(u8, element_start.name);
+                        errdefer self.allocator.free(name);
+                        try self.element_names.append(self.allocator, name);
+                        errdefer _ = self.element_names.pop();
+                        try self.namespace_context.startScope(self.allocator);
+                        self.pending_event = .{ .element_start = .{ .name = name } };
+                    },
+                    .element_content => |element_content| {
+                        if (try self.finalizePendingEvent()) |event| {
+                            self.pending_token = token;
+                            return event;
+                        }
+                        return .{ .element_content = .{ .content = try self.contentText(element_content.content) } };
+                    },
+                    .element_end => |element_end| {
+                        if (try self.finalizePendingEvent()) |event| {
+                            self.pending_token = token;
+                            return event;
+                        }
+                        const expected_name = self.element_names.pop();
+                        defer self.allocator.free(expected_name);
+                        if (!mem.eql(u8, expected_name, element_end.name)) {
+                            return error.SyntaxError;
+                        }
+                        const qname = try self.namespace_context.parseName(element_end.name, true).clone(event_allocator);
+                        self.namespace_context.endScope(self.allocator);
+                        return .{ .element_end = .{ .name = qname } };
+                    },
+                    .element_end_empty => {
+                        if (try self.finalizePendingEvent()) |event| {
+                            self.pending_token = token;
+                            return event;
+                        }
+                        const name = self.element_names.pop();
+                        defer self.allocator.free(name);
+                        const qname = try self.namespace_context.parseName(name, true).clone(event_allocator);
+                        self.namespace_context.endScope(self.allocator);
+                        return .{ .element_end = .{ .name = qname } };
+                    },
+                    .attribute_start => |attribute_start| {
+                        if (self.pending_event.element_start.attributes.contains(attribute_start.name)) {
+                            return error.SyntaxError;
+                        }
+                        self.pending_event.element_start.current_attribute = .{ .name = try event_allocator.dupe(u8, attribute_start.name) };
+                    },
+                    .attribute_content => |attribute_content| {
+                        const current_attribute = &self.pending_event.element_start.current_attribute;
+                        try current_attribute.value.appendSlice(event_allocator, try self.contentText(attribute_content.content));
                         if (attribute_content.final) {
-                            try self.namespace_context.bind(self.allocator, current_prefix, self.current_uri.items);
-                            self.current_prefix = null;
-                            self.current_uri.clearAndFree(self.allocator);
+                            try self.pending_event.element_start.attributes.putNoClobber(event_allocator, current_attribute.name, .{
+                                .name = current_attribute.name,
+                                .value = try current_attribute.value.toOwnedSlice(event_allocator),
+                            });
+                        }
+                    },
+                    .comment_start => {
+                        if (try self.finalizePendingEvent()) |event| {
+                            self.pending_token = token;
+                            return event;
+                        }
+                        self.pending_event = .{ .comment = .{} };
+                    },
+                    .comment_content => |comment_content| {
+                        try self.pending_event.comment.content.appendSlice(event_allocator, comment_content.content);
+                        if (comment_content.final) {
+                            const event = Event{ .comment = .{ .content = self.pending_event.comment.content.items } };
+                            self.pending_event = .none;
+                            return event;
+                        }
+                    },
+                    .pi_start => |pi_start| {
+                        if (try self.finalizePendingEvent()) |event| {
+                            self.pending_token = token;
+                            return event;
+                        }
+                        self.pending_event = .{ .pi = .{ .target = try event_allocator.dupe(u8, pi_start.target) } };
+                    },
+                    .pi_content => |pi_content| {
+                        try self.pending_event.pi.content.appendSlice(event_allocator, pi_content.content);
+                        if (pi_content.final) {
+                            const event = Event{ .pi = .{ .target = self.pending_event.pi.target, .content = self.pending_event.pi.content.items } };
+                            self.pending_event = .none;
+                            return event;
+                        }
+                    },
+                }
+            }
+        }
+
+        fn nextToken(self: *Self) !?Token {
+            if (self.pending_token) |token| {
+                self.pending_token = null;
+                return token;
+            }
+            return try self.token_reader.next();
+        }
+
+        fn finalizePendingEvent(self: *Self) !?Event {
+            const event_allocator = self.event_arena.allocator();
+            switch (self.pending_event) {
+                .none => return null,
+                .element_start => |element_start| {
+                    for (element_start.attributes.values()) |attr| {
+                        if (mem.eql(u8, attr.name, "xmlns")) {
+                            try self.namespace_context.bind(self.allocator, "", attr.value);
+                        } else if (mem.startsWith(u8, attr.name, "xmlns:")) {
+                            try self.namespace_context.bind(self.allocator, attr.name["xmlns:".len..], attr.value);
                         }
                     }
-
-                    return .{ .attribute_content = .{
-                        .element_name = self.element_names.getLast(),
-                        .attribute_name = self.attribute_name.?,
-                        .content = content,
-                        .final = attribute_content.final,
-                    } };
-                },
-
-                .comment_start => return .comment_start,
-
-                .comment_content => |comment_content| return .{ .comment_content = .{
-                    .content = self.bufRange(comment_content.content),
-                    .final = comment_content.final,
-                } },
-
-                .pi_start => |pi_start| {
-                    if (self.pi_target) |pi_target| {
-                        self.allocator.free(pi_target);
+                    const qname = self.namespace_context.parseName(element_start.name, true);
+                    var attributes = ArrayListUnmanaged(Event.Attribute){};
+                    try attributes.ensureTotalCapacity(event_allocator, element_start.attributes.count());
+                    for (element_start.attributes.values()) |attr| {
+                        attributes.appendAssumeCapacity(.{
+                            .name = self.namespace_context.parseName(attr.name, false),
+                            .value = attr.value,
+                        });
                     }
-                    const target = try self.bufRangeDupe(pi_start.target);
-                    self.pi_target = target;
-                    return .{ .pi_start = .{ .target = target } };
+                    self.pending_event = .none;
+                    return .{ .element_start = .{ .name = qname, .attributes = attributes.items } };
                 },
-
-                .pi_content => |pi_content| return .{ .pi_content = .{
-                    .pi_target = self.pi_target.?,
-                    .content = self.bufRange(pi_content.content),
-                    .final = pi_content.final,
-                } },
+                // Other pending events will have already been handled by
+                // looking at the 'final' content event
+                else => unreachable,
             }
         }
 
-        fn convertContent(self: *const Self, content: Token.Content) !Event.Content {
+        fn contentText(self: *Self, content: Token.Content) ![]const u8 {
             return switch (content) {
-                .text => |text| .{ .text = self.bufRange(text) },
-                .codepoint => |codepoint| .{ .codepoint = codepoint },
-                .entity => |entity| content: {
-                    const name = self.bufRange(entity);
-                    if (!entities.has(name)) {
-                        return error.SyntaxError;
-                    }
-                    break :content .{ .entity = name };
+                .text => |text| text,
+                .codepoint => |codepoint| text: {
+                    const len = unicode.utf8Encode(codepoint, &self.codepoint_buf) catch unreachable;
+                    break :text self.codepoint_buf[0..len];
                 },
+                .entity => |entity| entities.get(entity) orelse return error.SyntaxError,
             };
         }
 
-        inline fn bufRange(self: *const Self, range: Scanner.Range) []const u8 {
-            return self.buffer[range.start..range.end];
-        }
-
-        inline fn bufRangeDupe(self: *const Self, range: Scanner.Range) ![]u8 {
-            return try self.allocator.dupe(u8, self.bufRange(range));
-        }
-
-        /// Reads the node whose start event (`start_event`) was returned by
-        /// the last call to `next`.
-        ///
-        /// `start_event` must have been returned by the last call to `next`,
-        /// and it must be one of the "start" events, listed below with the
-        /// type of node which will be returned:
-        ///
-        /// - `element_start` - `Element`
-        /// - `attribute_start` - `Attribute`
-        /// - `comment_start` - `Comment`
-        /// - `pi_start` - `Pi`
-        ///
-        /// The returned node is owned by the caller, so the caller is
-        /// responsible for calling `deinit` on it when done (but it remains
-        /// valid until that point, even after further calls to `next` or
-        /// `nextNode`).
-        pub fn nextNode(self: *Self, allocator: Allocator, start_event: Event) Error!OwnedNode {
+        pub fn nextNode(self: *Self, allocator: Allocator, element_start: Event.ElementStart) Error!OwnedValue(Node.Element) {
             var arena = ArenaAllocator.init(allocator);
             errdefer arena.deinit();
-            const a = arena.allocator();
-            const node: Node = switch (start_event) {
-                .element_start => |element_start| .{ .element = try self.nextElementNode(a, element_start) },
-                .attribute_start => |attribute_start| .{ .attribute = try self.nextAttributeNode(a, attribute_start, true) },
-                .comment_start => .{ .comment = try self.nextCommentNode(a) },
-                .pi_start => |pi_start| .{ .pi = try self.nextPiNode(a, pi_start) },
-                else => unreachable,
+            return .{
+                .value = try self.nextElementNode(arena.allocator(), element_start),
+                .arena = arena,
             };
-            return .{ .node = node, .arena = arena };
         }
 
-        fn nextElementNode(self: *Self, allocator: Allocator, element_start: Event.ElementStart) !Node.Element {
-            const name = try allocator.dupe(u8, element_start.name);
+        fn nextElementNode(self: *Self, allocator: Allocator, element_start: Event.ElementStart) Error!Node.Element {
+            const name = try element_start.name.clone(allocator);
             var children = ArrayListUnmanaged(Node){};
-            var current_text = ArrayListUnmanaged(u8){};
+            try children.ensureTotalCapacity(allocator, element_start.attributes.len);
+            for (element_start.attributes) |attr| {
+                children.appendAssumeCapacity(.{ .attribute = .{
+                    .name = try attr.name.clone(allocator),
+                    .value = try allocator.dupe(u8, attr.value),
+                } });
+            }
+            var current_content = ArrayListUnmanaged(u8){};
             while (try self.next()) |event| {
-                if (event != .element_content and current_text.items.len > 0) {
-                    try children.append(allocator, .{ .text = .{ .content = try current_text.toOwnedSlice(allocator) } });
+                if (event != .element_content and current_content.items.len > 0) {
+                    try children.append(allocator, .{ .text = .{ .content = try current_content.toOwnedSlice(allocator) } });
                 }
                 switch (event) {
                     .element_start => |sub_element_start| try children.append(allocator, .{
                         .element = try self.nextElementNode(allocator, sub_element_start),
                     }),
-                    .element_content => |element_content| try appendContent(allocator, &current_text, element_content.content),
-                    .element_end => {
-                        // Until we have parsed all attributes, we cannot fully
-                        // process namespace information for the current
-                        // element and its attributes, so we just do this
-                        // processing when seeing the end tag
-                        const qname = try self.parseQNameOwned(allocator, name, true);
-                        for (children.items) |*child| {
-                            if (child.* == .attribute) {
-                                child.attribute.name = try self.parseQNameOwned(allocator, child.attribute.name.local, false);
-                            }
-                        }
-                        return .{ .name = qname, .children = children.items };
-                    },
-                    .attribute_start => |attribute_start| try children.append(allocator, .{
-                        .attribute = try self.nextAttributeNode(allocator, attribute_start, false),
-                    }),
-                    .comment_start => try children.append(allocator, .{
-                        .comment = try self.nextCommentNode(allocator),
-                    }),
-                    .pi_start => |pi_start| try children.append(allocator, .{
-                        .pi = try self.nextPiNode(allocator, pi_start),
-                    }),
-                    else => unreachable,
+                    .element_content => |element_content| try current_content.appendSlice(allocator, element_content.content),
+                    .element_end => return .{ .name = name, .children = children.items },
+                    .comment => |comment| try children.append(allocator, .{ .comment = .{
+                        .content = try allocator.dupe(u8, comment.content),
+                    } }),
+                    .pi => |pi| try children.append(allocator, .{ .pi = .{
+                        .target = try allocator.dupe(u8, pi.target),
+                        .content = try allocator.dupe(u8, pi.content),
+                    } }),
                 }
             }
             unreachable;
-        }
-
-        fn nextAttributeNode(self: *Self, allocator: Allocator, attribute_start: Event.AttributeStart, parse_qname: bool) !Node.Attribute {
-            const name = try allocator.dupe(u8, attribute_start.name);
-            const qname = if (parse_qname) try self.parseQNameOwned(allocator, name, false) else QName{ .local = name };
-            var value = ArrayListUnmanaged(u8){};
-            while (try self.next()) |event| {
-                const content_event = event.attribute_content;
-                try appendContent(allocator, &value, content_event.content);
-                if (content_event.final) {
-                    return .{ .name = qname, .value = value.items };
-                }
-            }
-            unreachable;
-        }
-
-        fn nextCommentNode(self: *Self, allocator: Allocator) !Node.Comment {
-            var content = ArrayListUnmanaged(u8){};
-            while (try self.next()) |event| {
-                const content_event = event.comment_content;
-                try content.appendSlice(allocator, content_event.content);
-                if (content_event.final) {
-                    return .{ .content = content.items };
-                }
-            }
-            unreachable;
-        }
-
-        fn nextPiNode(self: *Self, allocator: Allocator, pi_start: Event.PiStart) !Node.Pi {
-            const target = try allocator.dupe(u8, pi_start.target);
-            var content = ArrayListUnmanaged(u8){};
-            while (try self.next()) |event| {
-                const content_event = event.pi_content;
-                try content.appendSlice(allocator, content_event.content);
-                if (content_event.final) {
-                    return .{
-                        .target = target,
-                        .content = content.items,
-                    };
-                }
-            }
-            unreachable;
-        }
-
-        fn appendContent(allocator: Allocator, value: *ArrayListUnmanaged(u8), content: Event.Content) !void {
-            switch (content) {
-                .text => |text| try value.appendSlice(allocator, text),
-                .codepoint => |codepoint| {
-                    var buf: [max_encoded_codepoint_len]u8 = undefined;
-                    const len = unicode.utf8Encode(codepoint, &buf) catch unreachable;
-                    try value.appendSlice(allocator, buf[0..len]);
-                },
-                .entity => |entity| try value.appendSlice(allocator, entities.get(entity).?),
-            }
-        }
-
-        /// Parses a QName and additionally copies the namespace URI so it
-        /// remains valid even after the namespace context is freed.
-        ///
-        /// The prefix and local parts of the name are slices of `name` so they
-        /// are already owned by the arena.
-        fn parseQNameOwned(self: Self, allocator: Allocator, name: []const u8, use_default_ns: bool) !QName {
-            var qname = self.namespace_context.parseName(name, use_default_ns);
-            if (qname.ns) |*ns| {
-                ns.* = try allocator.dupe(u8, ns.*);
-            }
-            return qname;
         }
     };
-}
-
-test "line endings" {
-    try testValid("<root>Line 1\rLine 2\r\nLine 3\nLine 4\n\rLine 6\r\n\rLine 8</root>", &.{
-        .{ .element_start = .{ .name = "root" } },
-        .{ .element_content = .{ .element_name = "root", .content = .{ .text = "Line 1\nLine 2\nLine 3\nLine 4\n\nLine 6\n\nLine 8" } } },
-        .{ .element_end = .{ .name = "root" } },
-    });
-}
-
-test "attribute value normalization" {
-    try testValid("<root attr=' Line 1\rLine 2\r\nLine 3\nLine 4\t\tMore    content\n\rLine 6\r\n\rLine 8 '/>", &.{
-        .{ .element_start = .{ .name = "root" } },
-        .{ .attribute_start = .{ .element_name = "root", .name = "attr" } },
-        .{ .attribute_content = .{
-            .element_name = "root",
-            .attribute_name = "attr",
-            .content = .{ .text = " Line 1 Line 2 Line 3 Line 4  More    content  Line 6  Line 8 " },
-            .final = true,
-        } },
-        .{ .element_end = .{ .name = "root" } },
-    });
 }
 
 test "complex document" {
@@ -713,38 +453,68 @@ test "complex document" {
         \\
         \\
     , &.{
-        .{ .pi_start = .{ .target = "some-pi" } },
-        .{ .pi_content = .{ .pi_target = "some-pi", .content = "", .final = true } },
-        .comment_start,
-        .{ .comment_content = .{ .content = " A processing instruction with content follows ", .final = true } },
-        .{ .pi_start = .{ .target = "some-pi-with-content" } },
-        .{ .pi_content = .{ .pi_target = "some-pi-with-content", .content = "content", .final = true } },
-        .{ .element_start = .{ .name = "root" } },
-        .{ .element_content = .{ .element_name = "root", .content = .{ .text = "\n  " } } },
-        .{ .element_start = .{ .name = "p" } },
-        .{ .attribute_start = .{ .element_name = "p", .name = "class" } },
-        .{ .attribute_content = .{ .element_name = "p", .attribute_name = "class", .content = .{ .text = "test" }, .final = true } },
-        .{ .element_content = .{ .element_name = "p", .content = .{ .text = "Hello, " } } },
-        .{ .element_content = .{ .element_name = "p", .content = .{ .text = "world!" } } },
-        .{ .element_end = .{ .name = "p" } },
-        .{ .element_content = .{ .element_name = "root", .content = .{ .text = "\n  " } } },
-        .{ .element_start = .{ .name = "line" } },
-        .{ .element_end = .{ .name = "line" } },
-        .{ .element_content = .{ .element_name = "root", .content = .{ .text = "\n  " } } },
-        .{ .pi_start = .{ .target = "another-pi" } },
-        .{ .pi_content = .{ .pi_target = "another-pi", .content = "", .final = true } },
-        .{ .element_content = .{ .element_name = "root", .content = .{ .text = "\n  Text content goes here.\n  " } } },
-        .{ .element_start = .{ .name = "div" } },
-        .{ .element_start = .{ .name = "p" } },
-        .{ .element_content = .{ .element_name = "p", .content = .{ .entity = "amp" } } },
-        .{ .element_end = .{ .name = "p" } },
-        .{ .element_end = .{ .name = "div" } },
-        .{ .element_content = .{ .element_name = "root", .content = .{ .text = "\n" } } },
-        .{ .element_end = .{ .name = "root" } },
-        .comment_start,
-        .{ .comment_content = .{ .content = " Comments are allowed after the end of the root element ", .final = true } },
-        .{ .pi_start = .{ .target = "comment" } },
-        .{ .pi_content = .{ .pi_target = "comment", .content = "So are PIs ", .final = true } },
+        .{ .pi = .{ .target = "some-pi", .content = "" } },
+        .{ .comment = .{ .content = " A processing instruction with content follows " } },
+        .{ .pi = .{ .target = "some-pi-with-content", .content = "content" } },
+        .{ .element_start = .{ .name = .{ .local = "root" } } },
+        .{ .element_content = .{ .content = "\n  " } },
+        .{ .element_start = .{ .name = .{ .local = "p" }, .attributes = &.{
+            .{ .name = .{ .local = "class" }, .value = "test" },
+        } } },
+        .{ .element_content = .{ .content = "Hello, " } },
+        .{ .element_content = .{ .content = "world!" } },
+        .{ .element_end = .{ .name = .{ .local = "p" } } },
+        .{ .element_content = .{ .content = "\n  " } },
+        .{ .element_start = .{ .name = .{ .local = "line" } } },
+        .{ .element_end = .{ .name = .{ .local = "line" } } },
+        .{ .element_content = .{ .content = "\n  " } },
+        .{ .pi = .{ .target = "another-pi", .content = "" } },
+        .{ .element_content = .{ .content = "\n  Text content goes here.\n  " } },
+        .{ .element_start = .{ .name = .{ .local = "div" } } },
+        .{ .element_start = .{ .name = .{ .local = "p" } } },
+        .{ .element_content = .{ .content = "&" } },
+        .{ .element_end = .{ .name = .{ .local = "p" } } },
+        .{ .element_end = .{ .name = .{ .local = "div" } } },
+        .{ .element_content = .{ .content = "\n" } },
+        .{ .element_end = .{ .name = .{ .local = "root" } } },
+        .{ .comment = .{ .content = " Comments are allowed after the end of the root element " } },
+        .{ .pi = .{ .target = "comment", .content = "So are PIs " } },
+    });
+}
+
+test "namespace handling" {
+    try testValid(
+        \\<a:root xmlns:a="urn:1">
+        \\  <child xmlns="urn:2" xmlns:b="urn:3" attr="value">
+        \\    <b:child xmlns:a="urn:4" b:attr="value">
+        \\      <a:child />
+        \\    </b:child>
+        \\  </child>
+        \\</a:root>
+    , &.{
+        .{ .element_start = .{ .name = .{ .prefix = "a", .ns = "urn:1", .local = "root" }, .attributes = &.{
+            .{ .name = .{ .prefix = "xmlns", .ns = xmlns_ns, .local = "a" }, .value = "urn:1" },
+        } } },
+        .{ .element_content = .{ .content = "\n  " } },
+        .{ .element_start = .{ .name = .{ .ns = "urn:2", .local = "child" }, .attributes = &.{
+            .{ .name = .{ .local = "xmlns" }, .value = "urn:2" },
+            .{ .name = .{ .prefix = "xmlns", .ns = xmlns_ns, .local = "b" }, .value = "urn:3" },
+            .{ .name = .{ .local = "attr" }, .value = "value" },
+        } } },
+        .{ .element_content = .{ .content = "\n    " } },
+        .{ .element_start = .{ .name = .{ .prefix = "b", .ns = "urn:3", .local = "child" }, .attributes = &.{
+            .{ .name = .{ .prefix = "xmlns", .ns = xmlns_ns, .local = "a" }, .value = "urn:4" },
+            .{ .name = .{ .prefix = "b", .ns = "urn:3", .local = "attr" }, .value = "value" },
+        } } },
+        .{ .element_content = .{ .content = "\n      " } },
+        .{ .element_start = .{ .name = .{ .prefix = "a", .ns = "urn:4", .local = "child" } } },
+        .{ .element_end = .{ .name = .{ .prefix = "a", .ns = "urn:4", .local = "child" } } },
+        .{ .element_content = .{ .content = "\n    " } },
+        .{ .element_end = .{ .name = .{ .prefix = "b", .ns = "urn:3", .local = "child" } } },
+        .{ .element_content = .{ .content = "\n  " } },
+        .{ .element_end = .{ .name = .{ .ns = "urn:2", .local = "child" } } },
+        .{ .element_content = .{ .content = "\n" } },
+        .{ .element_end = .{ .name = .{ .prefix = "a", .ns = "urn:1", .local = "root" } } },
     });
 }
 
@@ -794,81 +564,39 @@ test "complex document nodes" {
     var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{});
     defer input_reader.deinit();
 
-    // some-pi
-    {
-        const event = try input_reader.next();
-        try testing.expect(event != null and event.? == .pi_start);
-        var node = try input_reader.nextNode(testing.allocator, event.?);
-        defer node.deinit();
-        try testing.expectEqualDeep(Node{ .pi = .{ .target = "some-pi", .content = "" } }, node.node);
-    }
+    try testing.expectEqualDeep(@as(?Event, .{ .pi = .{ .target = "some-pi", .content = "" } }), try input_reader.next());
+    try testing.expectEqualDeep(@as(?Event, .{ .comment = .{ .content = " A processing instruction with content follows " } }), try input_reader.next());
+    try testing.expectEqualDeep(@as(?Event, .{ .pi = .{ .target = "some-pi-with-content", .content = "content" } }), try input_reader.next());
 
-    // comment
-    {
-        const event = try input_reader.next();
-        try testing.expect(event != null and event.? == .comment_start);
-        var node = try input_reader.nextNode(testing.allocator, event.?);
-        defer node.deinit();
-        try testing.expectEqualDeep(Node{ .comment = .{ .content = " A processing instruction with content follows " } }, node.node);
-    }
-
-    // some-pi-with-content
-    {
-        const event = try input_reader.next();
-        try testing.expect(event != null and event.? == .pi_start);
-        var node = try input_reader.nextNode(testing.allocator, event.?);
-        defer node.deinit();
-        try testing.expectEqualDeep(Node{ .pi = .{ .target = "some-pi-with-content", .content = "content" } }, node.node);
-    }
-
-    // root
-    {
-        const event = try input_reader.next();
-        try testing.expect(event != null and event.? == .element_start);
-        var node = try input_reader.nextNode(testing.allocator, event.?);
-        defer node.deinit();
-        try testing.expectEqualDeep(Node{ .element = .{ .name = .{ .local = "root" }, .children = &.{
-            .{ .text = .{ .content = "\n  " } },
+    const root_start = try input_reader.next();
+    try testing.expect(root_start != null and root_start.? == .element_start);
+    var root_node = try input_reader.nextNode(testing.allocator, root_start.?.element_start);
+    defer root_node.deinit();
+    try testing.expectEqualDeep(Node.Element{ .name = .{ .local = "root" }, .children = &.{
+        .{ .text = .{ .content = "\n  " } },
+        .{ .element = .{ .name = .{ .local = "p" }, .children = &.{
+            .{ .attribute = .{ .name = .{ .local = "class" }, .value = "test" } },
+            .{ .text = .{ .content = "Hello, world!" } },
+        } } },
+        .{ .text = .{ .content = "\n  " } },
+        .{ .element = .{ .name = .{ .local = "line" }, .children = &.{} } },
+        .{ .text = .{ .content = "\n  " } },
+        .{ .pi = .{ .target = "another-pi", .content = "" } },
+        .{ .text = .{ .content = "\n  Text content goes here.\n  " } },
+        .{ .element = .{ .name = .{ .local = "div" }, .children = &.{
             .{ .element = .{ .name = .{ .local = "p" }, .children = &.{
-                .{ .attribute = .{ .name = .{ .local = "class" }, .value = "test" } },
-                .{ .text = .{ .content = "Hello, world!" } },
+                .{ .text = .{ .content = "&" } },
             } } },
-            .{ .text = .{ .content = "\n  " } },
-            .{ .element = .{ .name = .{ .local = "line" }, .children = &.{} } },
-            .{ .text = .{ .content = "\n  " } },
-            .{ .pi = .{ .target = "another-pi", .content = "" } },
-            .{ .text = .{ .content = "\n  Text content goes here.\n  " } },
-            .{ .element = .{ .name = .{ .local = "div" }, .children = &.{
-                .{ .element = .{ .name = .{ .local = "p" }, .children = &.{
-                    .{ .text = .{ .content = "&" } },
-                } } },
-            } } },
-            .{ .text = .{ .content = "\n" } },
-        } } }, node.node);
-    }
+        } } },
+        .{ .text = .{ .content = "\n" } },
+    } }, root_node.value);
 
-    // comment
-    {
-        const event = try input_reader.next();
-        try testing.expect(event != null and event.? == .comment_start);
-        var node = try input_reader.nextNode(testing.allocator, event.?);
-        defer node.deinit();
-        try testing.expectEqualDeep(Node{ .comment = .{ .content = " Comments are allowed after the end of the root element " } }, node.node);
-    }
-
-    // comment
-    {
-        const event = try input_reader.next();
-        try testing.expect(event != null and event.? == .pi_start);
-        var node = try input_reader.nextNode(testing.allocator, event.?);
-        defer node.deinit();
-        try testing.expectEqualDeep(Node{ .pi = .{ .target = "comment", .content = "So are PIs " } }, node.node);
-    }
-
+    try testing.expectEqualDeep(@as(?Event, .{ .comment = .{ .content = " Comments are allowed after the end of the root element " } }), try input_reader.next());
+    try testing.expectEqualDeep(@as(?Event, .{ .pi = .{ .target = "comment", .content = "So are PIs " } }), try input_reader.next());
     try testing.expect(try input_reader.next() == null);
 }
 
-test "namespace handling" {
+test "namespace handling for nodes" {
     // See https://github.com/ziglang/zig/pull/14981
     if (true) return error.SkipZigTest;
 
@@ -884,12 +612,11 @@ test "namespace handling" {
     var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{});
     defer input_reader.deinit();
 
-    var event = try input_reader.next();
-    try testing.expect(event != null and event.? == .element_start);
-
-    var node = try input_reader.nextNode(testing.allocator, event.?);
-    defer node.deinit();
-    try testing.expectEqualDeep(Node{ .element = .{ .name = .{ .prefix = "a", .ns = "urn:1", .local = "root" }, .children = &.{
+    var root_start = try input_reader.next();
+    try testing.expect(root_start != null and root_start.? == .element_start);
+    var root_node = try input_reader.nextNode(testing.allocator, root_start.?.element_start);
+    defer root_node.deinit();
+    try testing.expectEqualDeep(Node.Element{ .name = .{ .prefix = "a", .ns = "urn:1", .local = "root" }, .children = &.{
         .{ .attribute = .{ .name = .{ .prefix = "xmlns", .ns = xmlns_ns, .local = "a" }, .value = "urn:1" } },
         .{ .text = .{ .content = "\n  " } },
         .{ .element = .{ .name = .{ .ns = "urn:2", .local = "child" }, .children = &.{
@@ -907,5 +634,5 @@ test "namespace handling" {
             .{ .text = .{ .content = "\n  " } },
         } } },
         .{ .text = .{ .content = "\n" } },
-    } } }, node.node);
+    } }, root_node.value);
 }

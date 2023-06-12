@@ -9,7 +9,7 @@
 //! on the meaning of the `len` passed to `next`).
 //!
 //! Intentional (permanent) limitations (which can be addressed by
-//! higher-level APIs):
+//! higher-level APIs, such as `Reader`):
 //!
 //! - Does not validate that corresponding open and close tags match.
 //! - Does not validate that attribute names are not duplicated.

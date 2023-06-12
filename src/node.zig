@@ -3,15 +3,19 @@ const mem = std.mem;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const QName = @import("reader.zig").QName;
 
-pub const OwnedNode = struct {
-    node: Node,
-    arena: ArenaAllocator,
+pub fn OwnedValue(comptime T: type) type {
+    return struct {
+        value: T,
+        arena: ArenaAllocator,
 
-    pub fn deinit(self: *OwnedNode) void {
-        self.arena.deinit();
-        self.* = undefined;
-    }
-};
+        const Self = @This();
+
+        pub fn deinit(self: *Self) void {
+            self.arena.deinit();
+            self.* = undefined;
+        }
+    };
+}
 
 pub const Node = union(enum) {
     element: Element,
