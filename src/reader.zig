@@ -10,6 +10,7 @@ const ComptimeStringMap = std.ComptimeStringMap;
 const StringArrayHashMapUnmanaged = std.StringArrayHashMapUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 const encoding = @import("encoding.zig");
+const syntax = @import("syntax.zig");
 const Node = @import("node.zig").Node;
 const OwnedValue = @import("node.zig").OwnedValue;
 const Scanner = @import("Scanner.zig");
@@ -128,8 +129,10 @@ const NamespaceContext = struct {
     ///
     /// Only valid if there is a current scope.
     pub fn bind(self: *NamespaceContext, allocator: Allocator, prefix: []const u8, uri: []const u8) !void {
-        // TODO: forbid undeclaring prefixes in XML 1.0 documents
-        // TODO: validate that uri is a valid URI
+        // TODO: validate that uri is a valid URI reference
+        if (prefix.len != 0 and uri.len == 0) {
+            return error.CannotUndeclareNsPrefix;
+        }
         var bindings = &self.scopes.items[self.scopes.items.len - 1];
         const key = try allocator.dupe(u8, prefix);
         errdefer allocator.free(key);
@@ -155,12 +158,14 @@ const NamespaceContext = struct {
     /// `use_default_ns` specifies if the default namespace (if any) should be
     /// implied for the given name if it is unprefixed. This is appropriate for
     /// element names but not attribute names, per the namespaces spec.
-    pub fn parseName(self: NamespaceContext, name: []const u8, use_default_ns: bool) QName {
-        // TODO: validate the parts of the name
+    pub fn parseName(self: NamespaceContext, name: []const u8, use_default_ns: bool) !QName {
         if (mem.indexOfScalar(u8, name, ':')) |sep_pos| {
             const prefix = name[0..sep_pos];
-            const ns = self.getUri(prefix);
             const local = name[sep_pos + 1 ..];
+            if (!syntax.isNcName(prefix) or !syntax.isNcName(local)) {
+                return error.InvalidQName;
+            }
+            const ns = self.getUri(prefix) orelse return error.UndeclaredNsPrefix;
             return .{ .prefix = prefix, .ns = ns, .local = local };
         } else if (use_default_ns) {
             return .{ .ns = self.getUri(""), .local = name };
@@ -214,7 +219,14 @@ pub fn Reader(comptime TokenReaderType: type) type {
 
         const Self = @This();
 
-        pub const Error = Allocator.Error || TokenReaderType.Error;
+        pub const Error = error{
+            CannotUndeclareNsPrefix,
+            DuplicateAttribute,
+            InvalidQName,
+            MismatchedEndTag,
+            UndeclaredEntityReference,
+            UndeclaredNsPrefix,
+        } || Allocator.Error || TokenReaderType.Error;
 
         pub fn init(allocator: Allocator, token_reader: TokenReaderType) Self {
             return .{
@@ -274,9 +286,9 @@ pub fn Reader(comptime TokenReaderType: type) type {
                         const expected_name = self.element_names.pop();
                         defer self.allocator.free(expected_name);
                         if (!mem.eql(u8, expected_name, element_end.name)) {
-                            return error.SyntaxError;
+                            return error.MismatchedEndTag;
                         }
-                        const qname = try self.namespace_context.parseName(element_end.name, true).clone(event_allocator);
+                        const qname = try (try self.namespace_context.parseName(element_end.name, true)).clone(event_allocator);
                         self.namespace_context.endScope(self.allocator);
                         return .{ .element_end = .{ .name = qname } };
                     },
@@ -287,13 +299,13 @@ pub fn Reader(comptime TokenReaderType: type) type {
                         }
                         const name = self.element_names.pop();
                         defer self.allocator.free(name);
-                        const qname = try self.namespace_context.parseName(name, true).clone(event_allocator);
+                        const qname = try (try self.namespace_context.parseName(name, true)).clone(event_allocator);
                         self.namespace_context.endScope(self.allocator);
                         return .{ .element_end = .{ .name = qname } };
                     },
                     .attribute_start => |attribute_start| {
                         if (self.pending_event.element_start.attributes.contains(attribute_start.name)) {
-                            return error.SyntaxError;
+                            return error.DuplicateAttribute;
                         }
                         self.pending_event.element_start.current_attribute = .{ .name = try event_allocator.dupe(u8, attribute_start.name) };
                     },
@@ -361,12 +373,12 @@ pub fn Reader(comptime TokenReaderType: type) type {
                             try self.namespace_context.bind(self.allocator, attr.name["xmlns:".len..], attr.value);
                         }
                     }
-                    const qname = self.namespace_context.parseName(element_start.name, true);
+                    const qname = try self.namespace_context.parseName(element_start.name, true);
                     var attributes = ArrayListUnmanaged(Event.Attribute){};
                     try attributes.ensureTotalCapacity(event_allocator, element_start.attributes.count());
                     for (element_start.attributes.values()) |attr| {
                         attributes.appendAssumeCapacity(.{
-                            .name = self.namespace_context.parseName(attr.name, false),
+                            .name = try self.namespace_context.parseName(attr.name, false),
                             .value = attr.value,
                         });
                     }
@@ -386,7 +398,7 @@ pub fn Reader(comptime TokenReaderType: type) type {
                     const len = unicode.utf8Encode(codepoint, &self.codepoint_buf) catch unreachable;
                     break :text self.codepoint_buf[0..len];
                 },
-                .entity => |entity| entities.get(entity) orelse return error.SyntaxError,
+                .entity => |entity| entities.get(entity) orelse return error.UndeclaredEntityReference,
             };
         }
 
