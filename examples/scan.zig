@@ -23,7 +23,7 @@ pub fn main() !void {
     var input_buffered_reader = std.io.bufferedReader(input_file.reader());
     var input_reader = input_buffered_reader.reader();
     var scanner = xml.Scanner{};
-    var decoder = xml.encoding.Utf8Decoder{};
+    var decoder = xml.encoding.DefaultDecoder{};
 
     var line: usize = 1;
     var column: usize = 1;
