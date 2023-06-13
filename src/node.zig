@@ -18,11 +18,19 @@ pub fn OwnedValue(comptime T: type) type {
 }
 
 pub const Node = union(enum) {
+    document: Document,
     element: Element,
     attribute: Attribute,
     comment: Comment,
     pi: Pi,
     text: Text,
+
+    pub const Document = struct {
+        version: []const u8 = "1.0",
+        encoding: ?[]const u8 = null,
+        standalone: ?bool = null,
+        children: []const Node,
+    };
 
     pub const Element = struct {
         name: QName,

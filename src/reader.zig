@@ -37,11 +37,18 @@ pub const QName = struct {
 
 /// An event emitted by a reader.
 pub const Event = union(enum) {
+    xml_declaration: XmlDeclaration,
     element_start: ElementStart,
     element_content: ElementContent,
     element_end: ElementEnd,
     comment: Comment,
     pi: Pi,
+
+    pub const XmlDeclaration = struct {
+        version: []const u8,
+        encoding: ?[]const u8 = null,
+        standalone: ?bool = null,
+    };
 
     pub const ElementStart = struct {
         name: QName,
@@ -180,6 +187,52 @@ pub fn reader(allocator: Allocator, r: anytype, decoder: anytype) Reader(TokenRe
     return Reader(TokenReaderType).init(allocator, TokenReaderType.init(r, decoder));
 }
 
+pub fn readDocument(allocator: Allocator, r: anytype, decoder: anytype) !OwnedValue(Node.Document) {
+    var arena = ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const node_allocator = arena.allocator();
+
+    var decl_version: []const u8 = "1.0";
+    var decl_encoding: ?[]const u8 = null;
+    var decl_standalone: ?bool = null;
+    var children = ArrayListUnmanaged(Node){};
+
+    var xml_reader = reader(allocator, r, decoder);
+    defer xml_reader.deinit();
+    while (try xml_reader.next()) |event| {
+        switch (event) {
+            .xml_declaration => |xml_declaration| {
+                decl_version = try node_allocator.dupe(u8, xml_declaration.version);
+                if (xml_declaration.encoding) |e| {
+                    decl_encoding = try node_allocator.dupe(u8, e);
+                }
+                decl_standalone = xml_declaration.standalone;
+            },
+            .element_start => |element_start| try children.append(node_allocator, .{
+                .element = try xml_reader.nextElementNode(node_allocator, element_start),
+            }),
+            .comment => |comment| try children.append(node_allocator, .{ .comment = .{
+                .content = try node_allocator.dupe(u8, comment.content),
+            } }),
+            .pi => |pi| try children.append(node_allocator, .{ .pi = .{
+                .target = try node_allocator.dupe(u8, pi.target),
+                .content = try node_allocator.dupe(u8, pi.content),
+            } }),
+            else => unreachable,
+        }
+    }
+
+    return .{
+        .value = .{
+            .version = decl_version,
+            .encoding = decl_encoding,
+            .standalone = decl_standalone,
+            .children = children.items,
+        },
+        .arena = arena,
+    };
+}
+
 /// A streaming, pull-based XML parser wrapping a `std.io.Reader`.
 ///
 /// This parser behaves similarly to Go's `encoding/xml` package. It is a
@@ -255,10 +308,11 @@ pub fn Reader(comptime TokenReaderType: type) type {
             while (true) {
                 const token = (try self.nextToken()) orelse return null;
                 switch (token) {
-                    .xml_declaration => {
-                        // TODO: do something with this information, e.g.
-                        // changing behavior based on the XML version
-                    },
+                    .xml_declaration => |xml_declaration| return .{ .xml_declaration = .{
+                        .version = xml_declaration.version,
+                        .encoding = xml_declaration.encoding,
+                        .standalone = xml_declaration.standalone,
+                    } },
                     .element_start => |element_start| {
                         if (try self.finalizePendingEvent()) |event| {
                             self.pending_token = token;
@@ -427,6 +481,7 @@ pub fn Reader(comptime TokenReaderType: type) type {
                     try children.append(allocator, .{ .text = .{ .content = try current_content.toOwnedSlice(allocator) } });
                 }
                 switch (event) {
+                    .xml_declaration => unreachable,
                     .element_start => |sub_element_start| try children.append(allocator, .{
                         .element = try self.nextElementNode(allocator, sub_element_start),
                     }),
@@ -465,6 +520,7 @@ test "complex document" {
         \\
         \\
     , &.{
+        .{ .xml_declaration = .{ .version = "1.0" } },
         .{ .pi = .{ .target = "some-pi", .content = "" } },
         .{ .comment = .{ .content = " A processing instruction with content follows " } },
         .{ .pi = .{ .target = "some-pi-with-content", .content = "content" } },
@@ -576,6 +632,7 @@ test "complex document nodes" {
     var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{});
     defer input_reader.deinit();
 
+    try testing.expectEqualDeep(@as(?Event, .{ .xml_declaration = .{ .version = "1.0" } }), try input_reader.next());
     try testing.expectEqualDeep(@as(?Event, .{ .pi = .{ .target = "some-pi", .content = "" } }), try input_reader.next());
     try testing.expectEqualDeep(@as(?Event, .{ .comment = .{ .content = " A processing instruction with content follows " } }), try input_reader.next());
     try testing.expectEqualDeep(@as(?Event, .{ .pi = .{ .target = "some-pi-with-content", .content = "content" } }), try input_reader.next());
@@ -647,4 +704,56 @@ test "namespace handling for nodes" {
         } } },
         .{ .text = .{ .content = "\n" } },
     } }, root_node.value);
+}
+
+test readDocument {
+    // See https://github.com/ziglang/zig/pull/14981
+    if (true) return error.SkipZigTest;
+
+    var input_stream = std.io.fixedBufferStream(
+        \\<?xml version="1.0"?>
+        \\<?some-pi?>
+        \\<!-- A processing instruction with content follows -->
+        \\<?some-pi-with-content content?>
+        \\<root>
+        \\  <p class="test">Hello, <![CDATA[world!]]></p>
+        \\  <line />
+        \\  <?another-pi?>
+        \\  Text content goes here.
+        \\  <div><p>&amp;</p></div>
+        \\</root>
+        \\<!-- Comments are allowed after the end of the root element -->
+        \\
+        \\<?comment So are PIs ?>
+        \\
+        \\
+    );
+    var document_node = try readDocument(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{});
+    defer document_node.deinit();
+
+    try testing.expectEqualDeep(Node.Document{ .version = "1.0", .children = &.{
+        .{ .pi = .{ .target = "some-pi", .content = "" } },
+        .{ .comment = .{ .content = " A processing instruction with content follows " } },
+        .{ .pi = .{ .target = "some-pi-with-content", .content = "content" } },
+        .{ .element = .{ .name = .{ .local = "root" }, .children = &.{
+            .{ .text = .{ .content = "\n  " } },
+            .{ .element = .{ .name = .{ .local = "p" }, .children = &.{
+                .{ .attribute = .{ .name = .{ .local = "class" }, .value = "test" } },
+                .{ .text = .{ .content = "Hello, world!" } },
+            } } },
+            .{ .text = .{ .content = "\n  " } },
+            .{ .element = .{ .name = .{ .local = "line" }, .children = &.{} } },
+            .{ .text = .{ .content = "\n  " } },
+            .{ .pi = .{ .target = "another-pi", .content = "" } },
+            .{ .text = .{ .content = "\n  Text content goes here.\n  " } },
+            .{ .element = .{ .name = .{ .local = "div" }, .children = &.{
+                .{ .element = .{ .name = .{ .local = "p" }, .children = &.{
+                    .{ .text = .{ .content = "&" } },
+                } } },
+            } } },
+            .{ .text = .{ .content = "\n" } },
+        } } },
+        .{ .comment = .{ .content = " Comments are allowed after the end of the root element " } },
+        .{ .pi = .{ .target = "comment", .content = "So are PIs " } },
+    } }, document_node.value);
 }
