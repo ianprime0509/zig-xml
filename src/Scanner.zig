@@ -358,6 +358,14 @@ pub inline fn next(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token 
 /// function is needed because Zig has no "successdefer" to advance `pos` only
 /// in case of success).
 fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
+    // Note: none of the switch cases below capture by pointer, because it is
+    // too easy to accidentally clobber some state that needs to be returned in
+    // a token.
+    // Similarly, there is no blanket 'return error.SyntaxError' at the end of
+    // this function to avoid duplication across cases because it is too easy
+    // to miss a 'return .ok'.
+    // These decisions may be revisited later if they somehow manage to impact
+    // performance.
     switch (self.state) {
         .start => if (c == 0xFEFF or syntax.isSpace(c)) {
             self.state = .start_after_bom;
