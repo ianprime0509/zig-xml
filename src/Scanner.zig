@@ -38,6 +38,10 @@ state: State = .start,
 pos: usize = 0,
 /// The current element nesting depth.
 depth: usize = 0,
+/// Whether we are inside the doctype.
+in_doctype: bool = false,
+/// Whether the doctype has been seen already (or it is known to be absent).
+seen_doctype: bool = false,
 /// Whether the root element has been seen already.
 seen_root_element: bool = false,
 
@@ -83,6 +87,24 @@ pub const Token = union(enum) {
     ok,
     /// XML declaration.
     xml_declaration: XmlDeclaration,
+    /// Doctype start.
+    doctype_start: DoctypeStart,
+    /// Parameter entity in doctype.
+    parameter_entity: ParameterEntity,
+    /// Element declaration in doctype.
+    element_declaration: ElementDeclaration,
+    /// Start of attribute list declaration in doctype.
+    attlist_declaration_start: AttlistDeclarationStart,
+    /// Definition in attribute list declaration in doctype.
+    attlist_declaration_definition: AttlistDeclarationDefinition,
+    /// General entity declaration in doctype.
+    general_entity_declaration: GeneralEntityDeclaration,
+    /// Parameter entity declaration in doctype.
+    parameter_entity_declaration: ParameterEntityDeclaration,
+    /// Notation declaration in doctype.
+    notation_declaration: NotationDeclaration,
+    /// Doctype end.
+    doctype_end,
     /// Element start tag.
     element_start: ElementStart,
     /// Element content.
@@ -108,6 +130,90 @@ pub const Token = union(enum) {
         version: Range,
         encoding: ?Range = null,
         standalone: ?bool = null,
+    };
+
+    pub const DoctypeStart = struct {
+        root_name: Range,
+        public_id: ?Range = null,
+        system_id: ?Range = null,
+    };
+
+    pub const ParameterEntity = struct {
+        name: Range,
+    };
+
+    pub const ElementDeclaration = struct {
+        name: Range,
+        content_spec: ContentSpec,
+
+        pub const ContentSpec = union(enum) {
+            empty,
+            any,
+            mixed: struct { options: Range },
+            children: struct { definition: Range },
+        };
+    };
+
+    pub const AttlistDeclarationStart = struct {
+        element_name: Range,
+    };
+
+    pub const AttlistDeclarationDefinition = struct {
+        name: Range,
+        type: AttributeType,
+        default: Default,
+
+        pub const AttributeType = union(enum) {
+            cdata,
+            id,
+            idref,
+            idrefs,
+            entity,
+            entities,
+            nmtoken,
+            nmtokens,
+            notation: struct { options: Range },
+            enumeration: struct { options: Range },
+        };
+
+        pub const Default = union(enum) {
+            required,
+            implied,
+            fixed: struct { value: Range },
+        };
+    };
+
+    pub const GeneralEntityDeclaration = struct {
+        name: Range,
+        value: Value,
+
+        pub const Value = union(enum) {
+            internal: struct { value: Range },
+            external: struct {
+                public_id: ?Range = null,
+                system_id: Range,
+                ndata: ?Range = null,
+            },
+        };
+    };
+
+    pub const ParameterEntityDeclaration = struct {
+        name: Range,
+        value: Value,
+
+        pub const Value = union(enum) {
+            internal: struct { value: Range },
+            external: struct {
+                public_id: ?Range = null,
+                system_id: Range,
+            },
+        };
+    };
+
+    pub const NotationDeclaration = struct {
+        name: Range,
+        public_id: ?Range = null,
+        system_id: ?Range = null,
     };
 
     pub const ElementStart = struct {
@@ -169,6 +275,10 @@ pub const Token = union(enum) {
 /// "v", left is "ersion", so that when we handle the next character, we can
 /// fail parsing if it is not "e", and then set `left` to "rsion", and so on).
 pub const State = union(enum) {
+    // Note: due to the extremely large number of states in the state machine,
+    // they are organized roughly in the order one would expect to encounter
+    // them in a document, to make it slightly easier to follow.
+
     /// Start of document.
     start,
     /// Start of document after BOM.
@@ -223,6 +333,165 @@ pub const State = union(enum) {
     xml_decl_end,
     /// Start of document after XML declaration.
     start_after_xml_decl,
+
+    // Doctype parsing follows.
+    // Abandon hope all ye who enter here.
+
+    /// A '<!' (and some part of 'DOCTYPE ' after it) has been encountered.
+    doctype_start: struct { left: []const u8 },
+    /// After '<!DOCTYPE '.
+    doctype_after_start,
+    /// In root element name.
+    doctype_root_name: struct { start: usize },
+    /// After root element name.
+    doctype_after_root_name: struct { root_name: Range },
+    /// After some part of 'PUBLIC ' in doctype start.
+    doctype_public_start: struct { root_name: Range, left: []const u8 },
+    /// After some part of 'SYSTEM ' in doctype start.
+    doctype_system_start: struct { root_name: Range, left: []const u8 },
+    /// After 'PUBLIC' but before public ID.
+    doctype_before_public_id: struct { root_name: Range },
+    /// In public ID.
+    doctype_public_id: struct { root_name: Range, start: usize, quote: u8 },
+    /// After public ID or 'SYSTEM' but before system ID.
+    doctype_before_system_id: struct { root_name: Range, public_id: ?Range },
+    /// In system ID.
+    doctype_system_id: struct { root_name: Range, public_id: ?Range, start: usize, quote: u8 },
+    /// After external ID.
+    doctype_after_external_id,
+
+    /// In internal subset.
+    doctype_internal_subset,
+
+    /// After '%'.
+    doctype_pe_ref_start,
+    /// In PE reference name.
+    doctype_pe_ref_name: struct { start: usize },
+
+    /// After '<' in doctype.
+    doctype_unknown_start,
+    /// After '<!' in doctype.
+    doctype_unknown_start_bang,
+    /// After '<!E' in doctype.
+    doctype_unknown_start_e,
+
+    // <!ELEMENT ...>
+    /// After some part of '<!ELEMENT '.
+    doctype_element_decl_start: struct { left: []const u8 },
+    /// After '<!ELEMENT '.
+    doctype_element_decl_after_start,
+    /// In element name.
+    doctype_element_decl_name: struct { start: usize },
+    /// After element name.
+    doctype_element_decl_after_name: struct { name: Range },
+    /// After some part of 'EMPTY'.
+    doctype_element_decl_empty: struct { name: Range, left: []const u8 },
+    /// After some part of 'ANY'.
+    doctype_element_decl_any: struct { name: Range, left: []const u8 },
+    /// After '('.
+    doctype_element_decl_after_paren: struct { name: Range },
+    /// After some part of '#PCDATA'.
+    doctype_element_decl_pcdata: struct { name: Range, left: []const u8 },
+    /// After '#PCDATA' or mixed child name.
+    doctype_element_decl_mixed: struct { name: Range, start: usize },
+    /// After '|'.
+    doctype_element_decl_mixed_before_name: struct { name: Range, start: usize },
+    /// In mixed child name.
+    doctype_element_decl_mixed_name: struct { name: Range, start: usize },
+    // TODO: element declaration "children" spec.
+    // This will require more advanced techniques than used elsewhere here.
+    /// Before final '>'.
+    doctype_element_decl_before_end,
+
+    // <!ATTLIST ...>
+    /// After some part of '<!ATTLIST '.
+    doctype_attlist_decl_start: struct { left: []const u8 },
+    /// After '<!ATTLIST '.
+    doctype_attlist_decl_after_start,
+    /// In element name.
+    doctype_attlist_decl_name: struct { start: usize },
+    /// Before attribute name.
+    doctype_attlist_decl_def,
+    /// In attribute name.
+    doctype_attlist_decl_def_name: struct { start: usize },
+    /// After attribute name.
+    doctype_attlist_decl_def_after_name: struct { name: Range },
+    // TODO: I'm sure this sort of "literal options" state can be condensed
+    /// After some part of 'CDATA'.
+    doctype_attlist_decl_def_cdata: struct { name: Range, left: []const u8 },
+    /// After some part of 'ID'.
+    doctype_attlist_decl_def_id: struct { name: Range, left: []const u8 },
+    /// After 'ID'.
+    doctype_attlist_decl_def_after_id: struct { name: Range },
+    /// After some part of 'IDREF'.
+    doctype_attlist_decl_def_idref: struct { name: Range, left: []const u8 },
+    /// After 'IDREF'.
+    doctype_attlist_decl_def_after_idref: struct { name: Range },
+    /// After some part of 'ENTIT'.
+    doctype_attlist_decl_def_entit: struct { name: Range, left: []const u8 },
+    /// After 'ENTIT'.
+    doctype_attlist_decl_def_after_entit: struct { name: Range },
+    /// After some part of 'ENTITIES'.
+    doctype_attlist_decl_def_entities: struct { name: Range, left: []const u8 },
+    /// After 'N'.
+    doctype_attlist_decl_def_after_n: struct { name: Range },
+    /// After some part of 'NMTOKEN'.
+    doctype_attlist_decl_def_nmtoken: struct { name: Range, left: []const u8 },
+    /// After 'NMTOKEN'.
+    doctype_attlist_decl_def_after_nmtoken: struct { name: Range, left: []const u8 },
+    /// After some part of 'NOTATION '.
+    doctype_attlist_decl_def_notation: struct { name: Range, left: []const u8 },
+    /// After 'NOTATION '.
+    doctype_attlist_decl_def_after_notation: struct { name: Range },
+    /// Before option in 'NOTATION'.
+    doctype_attlist_decl_def_notation_before_option: struct { name: Range, start: usize },
+    /// In 'NOTATION' option name.
+    doctype_attlist_decl_def_notation_option: struct { name: Range, start: usize },
+    /// After 'NOTATION' option name.
+    doctype_attlist_decl_def_notation_after_option: struct { name: Range, start: usize },
+    /// Before option in enumeration.
+    doctype_attlist_decl_def_enumeration_before_option: struct { name: Range, start: usize },
+    /// In option in enumeration.
+    doctype_attlist_decl_def_enumeration_option: struct { name: Range, start: usize },
+    /// After option in enumeration.
+    doctype_attlist_decl_def_enumeration_after_option: struct { name: Range, start: usize },
+    /// After type but before mandatory space.
+    doctype_attlist_decl_def_after_type: struct { name: Range, type: Token.AttlistDeclarationDefinition.AttributeType },
+    /// Before default.
+    doctype_attlist_decl_def_before_default: struct { name: Range, type: Token.AttlistDeclarationDefinition.AttributeType },
+    /// After '#'.
+    doctype_attlist_decl_def_default: struct { name: Range, type: Token.AttlistDeclarationDefinition.AttributeType },
+    /// After some part of '#REQUIRED'.
+    doctype_attlist_decl_def_required: struct { name: Range, type: Token.AttlistDeclarationDefinition.AttributeType, left: []const u8 },
+    /// After some part of '#IMPLIED'.
+    doctype_attlist_decl_def_implied: struct { name: Range, type: Token.AttlistDeclarationDefinition.AttributeType, left: []const u8 },
+    /// After some part of '#FIXED '.
+    doctype_attlist_decl_def_fixed: struct { name: Range, type: Token.AttlistDeclarationDefinition.AttributeType, left: []const u8 },
+    /// After '#FIXED '.
+    doctype_attlist_decl_def_after_fixed: struct { name: Range, type: Token.AttlistDeclarationDefinition.AttributeType },
+    // TODO: validate references in fixed attribute value
+    /// In fixed attribute value.
+    doctype_attlist_decl_def_fixed_value: struct { name: Range, type: Token.AttlistDeclarationDefinition.AttributeType, start: usize, quote: u8 },
+    /// After attribute definition.
+    doctype_attlist_decl_after_def,
+
+    // <!ENTITY ...>
+    /// After some part of '<!ENTITY '.
+    doctype_entity_decl_start: struct { left: []const u8 },
+    /// After '<!ENTITY '.
+    doctype_entity_decl_after_start,
+
+    // <!NOTATION ...>
+    /// After some part of '<!NOTATION '.
+    doctype_notation_decl_start: struct { left: []const u8 },
+    /// After '<!NOTATION '.
+    doctype_notation_decl_after_start,
+
+    /// After internal subset.
+    doctype_after_internal_subset,
+
+    // End of doctype parsing.
+    // You may retrieve your hope at the door.
 
     /// A '<' has been encountered, but we don't know if it's an element, comment, etc.
     unknown_start,
@@ -358,6 +627,14 @@ pub inline fn next(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token 
 /// function is needed because Zig has no "successdefer" to advance `pos` only
 /// in case of success).
 fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
+    // Note: none of the switch cases below capture by pointer, because it is
+    // too easy to accidentally clobber some state that needs to be returned in
+    // a token.
+    // Similarly, there is no blanket 'return error.SyntaxError' at the end of
+    // this function to avoid duplication across cases because it is too easy
+    // to miss a 'return .ok'.
+    // These decisions may be revisited later if they somehow manage to impact
+    // performance.
     switch (self.state) {
         .start => if (c == 0xFEFF or syntax.isSpace(c)) {
             self.state = .start_after_bom;
@@ -379,13 +656,15 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         },
 
         .unknown_document_start => if (syntax.isNameStartChar(c)) {
+            if (self.depth == 0) {
+                self.seen_doctype = true;
+            }
             self.state = .{ .element_start_name = .{ .start = self.pos } };
             return .ok;
         } else if (c == '?') {
             self.state = .{ .pi_or_xml_decl_start = .{ .start = self.pos + len } };
             return .ok;
         } else if (c == '!') {
-            // TODO: doctype
             self.state = .unknown_start_bang;
             return .ok;
         } else {
@@ -632,7 +911,732 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
+        .doctype_start => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .doctype_after_start;
+            } else {
+                self.state = .{ .doctype_start = .{ .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_after_start => if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (syntax.isNameStartChar(c)) {
+            self.state = .{ .doctype_root_name = .{ .start = self.pos } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_root_name => |state| if (syntax.isNameChar(c)) {
+            return .ok;
+        } else if (syntax.isSpace(c)) {
+            self.state = .{ .doctype_after_root_name = .{ .root_name = .{ .start = state.start, .end = self.pos } } };
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_after_root_name => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == 'P') {
+            self.state = .{ .doctype_public_start = .{ .root_name = state.root_name, .left = "UBLIC " } };
+            return .ok;
+        } else if (c == 'S') {
+            self.state = .{ .doctype_system_start = .{ .root_name = state.root_name, .left = "YSTEM " } };
+            return .ok;
+        } else if (c == '[') {
+            self.state = .doctype_internal_subset;
+            return .{ .doctype_start = .{ .root_name = state.root_name } };
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_public_start => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .{ .doctype_before_public_id = .{ .root_name = state.root_name } };
+            } else {
+                self.state = .{ .doctype_public_start = .{ .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_system_start => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .{ .doctype_before_system_id = .{ .root_name = state.root_name, .public_id = null } };
+            } else {
+                self.state = .{ .doctype_system_start = .{ .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_before_public_id => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '"' or c == '\'') {
+            self.state = .{ .doctype_public_id = .{ .root_name = state.root_name, .start = self.pos + len, .quote = @intCast(u8, c) } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_public_id => |state| if (c == state.quote) {
+            self.state = .{ .doctype_before_system_id = .{ .root_name = state.root_name, .public_id = .{ .start = state.start, .end = self.pos } } };
+            return .ok;
+        } else if (syntax.isPubidChar(c)) {
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_before_system_id => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '"' or c == '\'') {
+            self.state = .{ .doctype_system_id = .{ .root_name = state.root_name, .public_id = state.public_id, .start = self.pos + len, .quote = @intCast(u8, c) } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_system_id => |state| if (c == state.quote) {
+            self.state = .doctype_after_external_id;
+            return .{ .doctype_start = .{ .root_name = state.root_name, .public_id = state.public_id, .system_id = state.system_id } };
+        } else if (syntax.isChar(c)) {
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_after_external_id => if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '[') {
+            self.state = .doctype_internal_subset;
+        } else if (c == '>') {
+            self.in_doctype = false;
+            self.seen_doctype = true;
+            self.state = .start_after_xml_decl;
+            return .doctype_end;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_internal_subset => if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '%') {
+            self.state = .doctype_pe_ref_start;
+            return .ok;
+        } else if (c == '<') {
+            self.state = .doctype_unknown_start;
+            return .ok;
+        } else if (c == ']') {
+            self.state = .doctype_after_internal_subset;
+            return .doctype_end;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_pe_ref_start => if (syntax.isNameStartChar(c)) {
+            self.state = .{ .doctype_pe_ref_name = .{ .start = self.pos } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_pe_ref_name => |state| if (syntax.isNameChar(c)) {
+            return .ok;
+        } else if (c == ';') {
+            self.state = .doctype_internal_subset;
+            return .{ .parameter_entity = .{ .start = state.start, .end = self.pos } };
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_unknown_start => if (c == '!') {
+            self.state = .doctype_unknown_start_bang;
+            return .ok;
+        } else if (c == '?') {
+            self.state = .pi;
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_unknown_start_bang => if (c == '-') {
+            self.state = .comment_before_start;
+            return .ok;
+        } else if (c == 'E') {
+            self.state = .doctype_unknown_start_e;
+            return .ok;
+        } else if (c == 'A') {
+            self.state = .{ .doctype_attlist_decl_start = .{ .left = "TTLIST " } };
+            return .ok;
+        } else if (c == 'N') {
+            self.state = .{ .doctype_notation_decl_start = .{ .left = "OTATION " } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_unknown_start_e => if (c == 'L') {
+            self.state = .{ .doctype_element_decl_start = .{ .left = "EMENT " } };
+            return .ok;
+        } else if (c == 'N') {
+            self.state = .{ .doctype_entity_decl_start = .{ .left = "TITY " } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_element_decl_start => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .doctype_element_decl_after_start;
+            } else {
+                self.state = .{ .doctype_element_decl_start = .{ .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_element_decl_after_start => if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (syntax.isNameStartChar(c)) {
+            self.state = .{ .doctype_element_decl_name = .{ .start = self.pos } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_element_name => |state| if (syntax.isNameChar(c)) {
+            return .ok;
+        } else if (syntax.isSpace(c)) {
+            self.state = .{ .doctype_element_decl_after_name = .{ .name = .{ .start = state.start, .end = self.pos } } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_element_decl_after_name => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == 'E') {
+            self.state = .{ .doctype_element_decl_empty = .{ .name = state.name, .left = "MPTY" } };
+            return .ok;
+        } else if (c == 'A') {
+            self.state = .{ .doctype_element_decl_any = .{ .name = state.name, .left = "NY" } };
+            return .ok;
+        } else if (c == '(') {
+            self.state = .{ .doctype_element_decl_after_paren = .{ .name = state.name } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_element_decl_empty => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .doctype_element_decl_before_end;
+                return .{ .element_declaration = .{ .name = state.name, .content_spec = .empty } };
+            } else {
+                self.state = .{ .doctype_element_decl_empty = .{ .name = state.name, .left = state.left[1..] } };
+                return .ok;
+            }
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_element_decl_any => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .doctype_element_decl_before_end;
+                return .{ .element_declaration = .{ .name = state.name, .content_spec = .any } };
+            } else {
+                self.state = .{ .doctype_element_decl_any = .{ .name = state.name, .left = state.left[1..] } };
+                return .ok;
+            }
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_element_decl_after_paren => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '#') {
+            self.state = .{ .doctype_element_decl_pcdata = .{ .name = state.name, .left = "PCDATA" } };
+            return .ok;
+        } else if (c == '(') {
+            // TODO: children spec parsing goes here
+            return error.SyntaxError;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_element_decl_pcdata => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .{ .doctype_element_decl_mixed = .{ .name = state.name, .start = self.pos + len } };
+            } else {
+                self.state = .{ .doctype_eement_decl_pcdata = .{ .name = state.name, .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_element_decl_mixed => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '|') {
+            self.state = .{ .doctype_element_decl_mixed_before_name = .{ .name = state.name, .start = state.start } };
+            return .ok;
+        } else if (c == ')') {
+            self.state = .doctype_element_decl_before_end;
+            return .{ .element_declaration = .{ .name = state.name, .content_spec = .{ .mixed = .{ .options = .{ .start = state.start, .end = self.pos } } } } };
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_element_decl_mixed_before_name => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (syntax.isNameStart(c)) {
+            self.state = .{ .doctype_element_decl_mixed_name = .{ .name = state.name, .start = state.start } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_element_decl_mixed_name => |state| if (syntax.isNameChar(c)) {
+            return .ok;
+        } else if (syntax.isSpace(c)) {
+            self.state = .{ .doctype_element_decl_mixed = .{ .name = state.name, .start = state.start } };
+            return .ok;
+        } else if (c == '|') {
+            self.state = .{ .doctype_element_decl_mixed_before_name = .{ .name = state.name, .start = state.start } };
+            return .ok;
+        } else if (c == ')') {
+            self.state = .doctype_element_decl_before_end;
+            return .{ .element_declaration = .{ .name = state.name, .content_spec = .{ .mixed = .{ .options = .{ .start = state.start, .end = self.pos } } } } };
+        },
+
+        .doctype_element_decl_before_end => if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '>') {
+            self.state = .doctype_internal_subset;
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_start => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .doctype_attlist_decl_after_start;
+            } else {
+                self.state = .{ .doctype_attlist_decl_start = .{ .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_after_start => if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (syntax.isNameStartChar(c)) {
+            self.state = .{ .doctype_attlist_decl_name = .{ .start = self.pos } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_name => |state| if (syntax.isNameChar(c)) {
+            return .ok;
+        } else if (syntax.isSpace(c)) {
+            self.state = .doctype_attlist_decl_def;
+            return .{ .attlist_declaration_start = .{ .element_name = .{ .start = state.start, .end = self.pos } } };
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def => if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (syntax.isNameStartChar(c)) {
+            self.state = .{ .doctype_attlist_decl_def_name = .{ .start = self.pos } };
+            return .ok;
+        } else if (c == '>') {
+            self.state = .doctype_internal_subset;
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_name => |state| if (syntax.isNameChar(c)) {
+            return .ok;
+        } else if (syntax.isSpace(c)) {
+            self.state = .{ .doctype_attlist_decl_def_after_name = .{ .name = .{ .start = state.start, .end = self.pos } } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_after_name => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == 'C') {
+            self.state = .{ .doctype_attlist_decl_def_cdata = .{ .name = state.name, .left = "DATA" } };
+            return .ok;
+        } else if (c == 'I') {
+            self.state = .{ .doctype_attlist_decl_def_id = .{ .name = state.name, .left = "D" } };
+            return .ok;
+        } else if (c == 'E') {
+            self.state = .{ .doctype_attlist_decl_def_entit = .{ .name = state.name, .left = "NTIT" } };
+            return .ok;
+        } else if (c == 'N') {
+            self.state = .{ .doctype_attlist_decl_def_after_n = .{ .name = state.name } };
+            return .ok;
+        } else if (c == '(') {
+            self.state = .{ .doctype_attlist_decl_enumeration_before_option = .{ .name = state.name, .start = self.pos + len } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_cdata => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .{ .doctype_attlist_decl_after_type = .{ .name = state.name, .type = .cdata } };
+            } else {
+                self.state = .{ .doctype_attlist_decl_def_cdata = .{ .name = state.name, .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_id => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .{ .doctype_attlist_decl_def_after_id = .{ .name = state.name } };
+            } else {
+                self.state = .{ .doctype_attlist_decl_def_id = .{ .name = state.name, .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_after_id => |state| if (syntax.isSpace(c)) {
+            self.state = .{ .doctype_attlist_decl_before_default = .{ .name = state.name, .type = .id } };
+            return .ok;
+        } else if (c == 'R') {
+            self.state = .{ .doctype_attlist_decl_idref = .{ .name = state.name, .left = "EF" } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_idref => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .{ .doctype_attlist_decl_def_after_idref = .{ .name = state.name } };
+            } else {
+                self.state = .{ .doctype_attlist_decl_def_idref = .{ .name = state.name, .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_after_idref => |state| if (syntax.isSpace(c)) {
+            self.state = .{ .doctype_attlist_decl_before_default = .{ .name = state.name, .type = .idref } };
+            return .ok;
+        } else if (c == 'S') {
+            self.state = .{ .doctype_attlist_decl_after_type = .{ .name = state.name, .type = .idrefs } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_entit => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .{ .doctype_attlist_decl_def_after_entit = .{ .name = state.name } };
+            } else {
+                self.state = .{ .doctype_attlist_decl_def_entit = .{ .name = state.name, .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_after_entit => |state| if (c == 'Y') {
+            self.state = .{ .doctype_attlist_decl_after_type = .{ .name = state.name, .type = .entity } };
+            return .ok;
+        } else if (c == 'I') {
+            self.state = .{ .doctype_attlist_decl_def_entities = .{ .name = state.name, .left = "ES" } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_entities => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .{ .doctype_attlist_decl_after_type = .{ .name = state.name, .type = .entities } };
+            } else {
+                self.state = .{ .doctype_attlist_decl_def_entities = .{ .name = state.name, .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_after_n => |state| if (c == 'M') {
+            self.state = .{ .doctype_attlist_decl_def_nmtoken = .{ .name = state.name, .left = "TOKEN" } };
+            return .ok;
+        } else if (c == 'O') {
+            self.state = .{ .doctype_attlist_decl_notation = .{ .name = state.name, .left = "TATION " } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_nmtoken => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .{ .doctype_attlist_decl_def_after_nmtoken = .{ .name = state.name } };
+            } else {
+                self.state = .{ .doctype_attlist_decl_def_nmtoken = .{ .name = state.name, .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_after_nmtoken => |state| if (syntax.isSpace(c)) {
+            self.state = .{ .doctype_attlist_decl_def_before_default = .{ .name = state.name, .type = .nmtoken } };
+            return .ok;
+        } else if (c == 'S') {
+            self.state = .{ .doctype_attlist_decl_def_after_type = .{ .name = state.name, .type = .nmtokens } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_notation => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .{ .doctype_attlist_decl_def_after_notation = .{ .name = state.name } };
+            } else {
+                self.state = .{ .doctype_attlist_decl_def_notation = .{ .name = state.name, .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_after_notation => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '(') {
+            self.state = .{ .doctype_attlist_decl_def_notation_before_option = .{ .name = state.name, .start = self.pos + len } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_notation_before_option => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (syntax.isNameStartChar(c)) {
+            self.state = .{ .doctype_attlist_decl_def_notation_option = .{ .name = state.name, .start = state.start } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_notation_option => |state| if (syntax.isNameChar(c)) {
+            return .ok;
+        } else if (syntax.isSpace(c)) {
+            self.state = .{ .doctype_attlist_decl_def_notation_after_option = .{ .name = state.name, .start = state.start } };
+            return .ok;
+        } else if (c == '|') {
+            self.state = .{ .doctype_attlist_decl_def_notation_before_option = .{ .name = state.name, .start = state.start } };
+            return .ok;
+        } else if (c == ')') {
+            self.state = .{ .doctype_attlist_decl_def_after_type = .{ .name = state.name, .type = .{ .notation = .{ .options = .{ .start = state.start, .end = self.pos } } } } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_notation_after_option => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '|') {
+            self.state = .{ .doctype_attlist_decl_def_notation_before_option = .{ .name = state.name, .start = state.start } };
+            return .ok;
+        } else if (c == ')') {
+            self.state = .{ .doctype_attlist_decl_def_after_type = .{ .name = state.name, .type = .{ .notation = .{ .options = .{ .start = state.start, .end = self.pos } } } } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_enumeration_before_option => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (syntax.isNameStartChar(c)) {
+            self.state = .{ .doctype_attlist_decl_def_enumeration_option = .{ .name = state.name, .start = state.start } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_enumeration_option => |state| if (syntax.isNameChar(c)) {
+            return .ok;
+        } else if (syntax.isSpace(c)) {
+            self.state = .{ .doctype_attlist_decl_def_enumeration_after_option = .{ .name = state.name, .start = state.start } };
+            return .ok;
+        } else if (c == '|') {
+            self.state = .{ .doctype_attlist_decl_def_enumeration_before_option = .{ .name = state.name, .start = state.start } };
+            return .ok;
+        } else if (c == ')') {
+            self.state = .{ .doctype_attlist_decl_def_after_type = .{ .name = state.name, .type = .{ .enumeration = .{ .options = .{ .start = state.start, .end = self.pos } } } } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_enumeration_after_option => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '|') {
+            self.state = .{ .doctype_attlist_decl_def_enumeration_before_option = .{ .name = state.name, .start = state.start } };
+            return .ok;
+        } else if (c == ')') {
+            self.state = .{ .doctype_attlist_decl_def_after_type = .{ .name = state.name, .type = .{ .enumeration = .{ .options = .{ .start = state.start, .end = self.pos } } } } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_after_type => |state| if (syntax.isSpace(c)) {
+            self.state = .{ .doctype_attlist_decl_def_before_default = .{ .name = state.name, .type = state.type } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_before_default => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '#') {
+            self.state = .{ .doctype_attlist_decl_def_default = .{ .name = state.name, .type = state.type } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_default => |state| if (c == 'R') {
+            self.state = .{ .doctype_attlist_decl_def_required = .{ .name = state.name, .type = state.type, .left = "EQUIRED" } };
+            return .ok;
+        } else if (c == 'I') {
+            self.state = .{ .doctype_attlist_decl_def_implied = .{ .name = state.name, .type = state.type, .left = "MPLIED" } };
+            return .ok;
+        } else if (c == 'F') {
+            self.state = .{ .doctype_attlist_decl_def_fixed = .{ .name = state.name, .type = state.type, .left = "IXED " } };
+            return .ok;
+        } else if (c == '"' or c == '\'') {
+            self.state = .{ .doctype_attlist_decl_def_fixed_value = .{ .name = state.name, .type = state.type, .start = self.pos + len, .quote = @intCast(u8, c) } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_required => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .doctype_attlist_decl_after_def;
+                return .{ .attlist_declaration_definition = .{ .name = state.name, .type = state.type, .default = .required } };
+            } else {
+                self.state = .{ .doctype_attlist_decl_def_required = .{ .name = state.name, .type = state.type, .left = state.left[1..] } };
+                return .ok;
+            }
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_implied => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .doctype_attlist_decl_after_def;
+                return .{ .attlist_declaration_definition = .{ .name = state.name, .type = state.type, .default = .implied } };
+            } else {
+                self.state = .{ .doctype_attlist_decl_def_implied = .{ .name = state.name, .type = state.type, .left = state.left[1..] } };
+                return .ok;
+            }
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_fixed => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .{ .doctype_attlist_decl_def_after_fixed = .{ .name = state.name, .type = state.type } };
+            } else {
+                self.state = .{ .doctype_attlist_decl_def_fixed = .{ .name = state.name, .type = state.type, .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_after_fixed => |state| if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '"' or c == '\'') {
+            self.state = .{ .doctype_attlist_decl_def_fixed_value = .{ .name = state.name, .type = state.type, .start = self.pos + len, .quote = @intCast(u8, c) } };
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_def_fixed_value => |state| if (c == state.quote) {
+            self.state = .doctype_attlist_decl_after_def;
+            return .{ .attlist_declaration_definition = .{ .name = state.name, .type = state.type, .default = .{ .fixed = .{ .value = .{ .start = state.start, .end = self.pos } } } } };
+        } else if (syntax.isChar(c)) {
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_attlist_decl_after_def => if (syntax.isSpace(c)) {
+            self.state = .doctype_attlist_decl_def;
+            return .ok;
+        } else if (c == '>') {
+            self.state = .doctype_internal_subset;
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_entity_decl_start => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .doctype_entity_decl_after_start;
+            } else {
+                self.state = .{ .doctype_entity_decl_start = .{ .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_notation_decl_start => |state| if (c == state.left[0]) {
+            if (state.left.len == 1) {
+                self.state = .doctype_notation_decl_after_start;
+            } else {
+                self.state = .{ .doctype_notation_decl_start = .{ .left = state.left[1..] } };
+            }
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
+        .doctype_after_internal_subset => if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '>') {
+            self.in_doctype = false;
+            self.seen_doctype = true;
+            self.state = .start_after_xml_decl;
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
         .unknown_start => if (syntax.isNameStartChar(c) and !self.seen_root_element) {
+            if (self.depth == 0) {
+                self.seen_doctype = true;
+            }
             self.state = .{ .element_start_name = .{ .start = self.pos } };
             return .ok;
         } else if (c == '/' and self.depth > 0) {
@@ -654,6 +1658,10 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         } else if (self.depth > 0 and c == '[') {
             // Textual content is not allowed outside the root element.
             self.state = .{ .cdata_before_start = .{ .left = "CDATA[" } };
+            return .ok;
+        } else if (!self.seen_doctype and c == 'D') {
+            self.in_doctype = true;
+            self.state = .{ .doctype_start = .{ .left = "OCTYPE " } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -686,7 +1694,11 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         },
 
         .comment_before_end => if (c == '>') {
-            self.state = .{ .content = .{ .start = self.pos + len } };
+            if (self.in_doctype) {
+                self.state = .doctype_internal_subset;
+            } else {
+                self.state = .{ .content = .{ .start = self.pos + len } };
+            }
             return .ok;
         } else {
             return error.SyntaxError;
@@ -743,7 +1755,11 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         },
 
         .pi_maybe_end => |state| if (c == '>') {
-            self.state = .{ .content = .{ .start = self.pos + len } };
+            if (self.in_doctype) {
+                self.state = .doctype_internal_subset;
+            } else {
+                self.state = .{ .content = .{ .start = self.pos + len } };
+            }
             return .{ .pi_content = .{ .content = .{ .start = state.start, .end = state.end }, .final = true } };
         } else if (syntax.isChar(c)) {
             self.state = .{ .pi_content = .{ .start = state.start } };

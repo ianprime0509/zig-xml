@@ -104,3 +104,35 @@ pub inline fn isEncodingChar(c: u21) bool {
         else => false,
     };
 }
+
+pub inline fn isPubidChar(c: u21) bool {
+    return switch (c) {
+        ' ',
+        '\r',
+        '\n',
+        'a'...'z',
+        'A'...'Z',
+        '0'...'9',
+        '-',
+        '\'',
+        '(',
+        ')',
+        '+',
+        ',',
+        '.',
+        '/',
+        ':',
+        '=',
+        '?',
+        ';',
+        '!',
+        '*',
+        '#',
+        '@',
+        '$',
+        '_',
+        '%',
+        => true,
+        else => false,
+    };
+}
