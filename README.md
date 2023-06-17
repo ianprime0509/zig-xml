@@ -21,6 +21,23 @@ and don't want to keep the README updated yet.
 See the `examples` directory (these examples are not very good right now but
 they do show how to use most of the library).
 
+## Fuzzing
+
+This library has some basic support for fuzz testing, taking its basic method
+from the article
+[Fuzzing Zig Code Using AFL++](https://www.ryanliptak.com/blog/fuzzing-zig-code/).
+To start fuzzing, you will need
+[AFL++](https://github.com/AFLplusplus/AFLplusplus), specifically
+`afl-clang-lto` and `afl-fuzz`, in your path. Then, you can run
+`zig build fuzz`. To resume a prior fuzzing session, pass `-Dresume=true`.
+
+You can also run `zig build install-fuzz` to just build the fuzz executable and
+then run it with `afl-fuzz` separately.
+
+Finally, if any crashes are identified during fuzzing, they can be replayed by
+feeding the crash input back to `zig build fuzz-reproduce`, which will yield an
+error trace for further debugging.
+
 ## License
 
 zig-xml is free and open source software, released under the

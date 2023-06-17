@@ -1,2 +1,4 @@
+core.*
+fuzz/outputs
 zig-cache
 zig-out
