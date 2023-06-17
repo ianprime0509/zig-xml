@@ -6,14 +6,15 @@ pub fn build(b: *std.Build) void {
 
     const lib = b.addStaticLibrary(.{
         .name = "zig-xml",
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = .{ .path = "src/xml.zig" },
         .target = target,
         .optimize = optimize,
     });
+    lib.emit_docs = .emit;
     b.installArtifact(lib);
 
     const main_tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = .{ .path = "src/xml.zig" },
         .target = target,
         .optimize = optimize,
     });
@@ -23,7 +24,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_main_tests.step);
 
-    const module = b.addModule("xml", .{ .source_file = .{ .path = "src/main.zig" } });
+    const module = b.addModule("xml", .{ .source_file = .{ .path = "src/xml.zig" } });
 
     const install_examples_step = b.step("install-examples", "Install examples");
 

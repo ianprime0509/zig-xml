@@ -3,6 +3,8 @@ const mem = std.mem;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const QName = @import("reader.zig").QName;
 
+/// A node value along with an `ArenaAllocator` used to allocate all memory
+/// backing it.
 pub fn OwnedValue(comptime T: type) type {
     return struct {
         value: T,
@@ -17,6 +19,7 @@ pub fn OwnedValue(comptime T: type) type {
     };
 }
 
+/// A node in an XML document.
 pub const Node = union(enum) {
     document: Document,
     element: Element,

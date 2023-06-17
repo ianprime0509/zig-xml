@@ -1,4 +1,5 @@
 core.*
+docs
 fuzz/outputs
 zig-cache
 zig-out

@@ -182,11 +182,13 @@ const NamespaceContext = struct {
     }
 };
 
+/// Returns a `Reader` wrapping a `std.io.Reader`.
 pub fn reader(allocator: Allocator, r: anytype, decoder: anytype) Reader(TokenReader(4096, @TypeOf(r), @TypeOf(decoder))) {
     const TokenReaderType = TokenReader(4096, @TypeOf(r), @TypeOf(decoder));
     return Reader(TokenReaderType).init(allocator, TokenReaderType.init(r, decoder));
 }
 
+/// Reads a full XML document from a `std.io.Reader`.
 pub fn readDocument(allocator: Allocator, r: anytype, decoder: anytype) !OwnedValue(Node.Document) {
     var arena = ArenaAllocator.init(allocator);
     errdefer arena.deinit();
