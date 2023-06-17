@@ -920,18 +920,16 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             const value = 10 * @as(u32, state.value) + syntax.digitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
-            } else {
-                self.state = .{ .attribute_content_char_ref = .{ .hex = false, .value = @intCast(u21, value), .quote = state.quote } };
-                return .ok;
             }
+            self.state = .{ .attribute_content_char_ref = .{ .hex = false, .value = @intCast(u21, value), .quote = state.quote } };
+            return .ok;
         } else if (state.hex and syntax.isHexDigit(c)) {
             const value = 16 * @as(u32, state.value) + syntax.hexDigitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
-            } else {
-                self.state = .{ .attribute_content_char_ref = .{ .hex = true, .value = @intCast(u21, value), .quote = state.quote } };
-                return .ok;
             }
+            self.state = .{ .attribute_content_char_ref = .{ .hex = true, .value = @intCast(u21, value), .quote = state.quote } };
+            return .ok;
         } else if (c == ';' and syntax.isChar(state.value)) {
             self.state = .{ .attribute_content = .{ .start = self.pos + len, .quote = state.quote } };
             return .{ .attribute_content = .{ .content = .{ .codepoint = state.value } } };
@@ -1040,19 +1038,17 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             const value = 10 * @as(u32, state.value) + syntax.digitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
-            } else {
-                self.state = .{ .content_char_ref = .{ .hex = false, .value = @intCast(u21, value) } };
-                return .ok;
             }
+            self.state = .{ .content_char_ref = .{ .hex = false, .value = @intCast(u21, value) } };
+            return .ok;
         } else if (state.hex and syntax.isHexDigit(c)) {
             const value = 16 * @as(u32, state.value) + syntax.hexDigitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
-            } else {
-                self.state = .{ .content_char_ref = .{ .hex = true, .value = @intCast(u21, value) } };
-                return .ok;
             }
-        } else if (c == ';' and syntax.isChar(c)) {
+            self.state = .{ .content_char_ref = .{ .hex = true, .value = @intCast(u21, value) } };
+            return .ok;
+        } else if (c == ';' and syntax.isChar(state.value)) {
             self.state = .{ .content = .{ .start = self.pos + len } };
             return .{ .element_content = .{ .content = .{ .codepoint = state.value } } };
         } else {
@@ -1354,11 +1350,15 @@ test "invalid reference" {
     try testInvalid("<element>&#ABC;</element>", 11);
     try testInvalid("<element>&#12C;</element>", 13);
     try testInvalid("<element>&#xxx;</element>", 12);
+    try testInvalid("<element>&#0;</element>", 12);
+    try testInvalid("<element>&#x1f0000;</element>", 18);
     try testInvalid("<element attr='&' />", 16);
     try testInvalid("<element attr='&amp' />", 19);
     try testInvalid("<element attr='&#ABC' />", 17);
     try testInvalid("<element attr='&#12C' />", 19);
     try testInvalid("<element attr='&#xxx' />", 18);
+    try testInvalid("<element attr='&#0;' />", 18);
+    try testInvalid("<element attr='&#x1f0000;' />", 24);
 }
 
 test "missing root element" {
