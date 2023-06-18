@@ -15,7 +15,7 @@ pub fn main() void {
     const allocator = gpa.allocator();
 
     var stdin_buf = std.io.bufferedReader(std.io.getStdIn().reader());
-    var reader = xml.reader(allocator, stdin_buf.reader(), xml.encoding.DefaultDecoder{});
+    var reader = xml.reader(allocator, stdin_buf.reader(), xml.encoding.DefaultDecoder{}, .{});
     defer reader.deinit();
 
     var stdout_buf = std.io.bufferedWriter(std.io.getStdOut().writer());

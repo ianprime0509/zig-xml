@@ -182,13 +182,43 @@ const NamespaceContext = struct {
     }
 };
 
+/// A drop-in replacement for `NamespaceContext` which doesn't actually do any
+/// namespace processing.
+const UnawareNamespaceContext = struct {
+    pub inline fn deinit(_: *UnawareNamespaceContext, _: Allocator) void {}
+
+    pub inline fn startScope(_: *UnawareNamespaceContext, _: Allocator) !void {}
+
+    pub inline fn endScope(_: *UnawareNamespaceContext, _: Allocator) void {}
+
+    pub inline fn bind(_: *UnawareNamespaceContext, _: Allocator, _: []const u8, _: []const u8) !void {}
+
+    pub inline fn getUri(_: UnawareNamespaceContext, _: []const u8) ?[]const u8 {
+        return null;
+    }
+
+    pub inline fn parseName(_: UnawareNamespaceContext, name: []const u8, _: bool) !QName {
+        return .{ .local = name };
+    }
+};
+
 /// Returns a `Reader` wrapping a `std.io.Reader`.
-pub fn reader(allocator: Allocator, r: anytype, decoder: anytype) Reader(4096, @TypeOf(r), @TypeOf(decoder)) {
-    return Reader(4096, @TypeOf(r), @TypeOf(decoder)).init(allocator, r, decoder);
+pub fn reader(
+    allocator: Allocator,
+    r: anytype,
+    decoder: anytype,
+    comptime options: ReaderOptions,
+) Reader(@TypeOf(r), @TypeOf(decoder), options) {
+    return Reader(@TypeOf(r), @TypeOf(decoder), options).init(allocator, r, decoder);
 }
 
 /// Reads a full XML document from a `std.io.Reader`.
-pub fn readDocument(allocator: Allocator, r: anytype, decoder: anytype) !OwnedValue(Node.Document) {
+pub fn readDocument(
+    allocator: Allocator,
+    r: anytype,
+    decoder: anytype,
+    comptime options: ReaderOptions,
+) !OwnedValue(Node.Document) {
     var arena = ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const node_allocator = arena.allocator();
@@ -198,7 +228,7 @@ pub fn readDocument(allocator: Allocator, r: anytype, decoder: anytype) !OwnedVa
     var decl_standalone: ?bool = null;
     var children = ArrayListUnmanaged(Node){};
 
-    var xml_reader = reader(allocator, r, decoder);
+    var xml_reader = reader(allocator, r, decoder, options);
     defer xml_reader.deinit();
     while (try xml_reader.next()) |event| {
         switch (event) {
@@ -234,6 +264,12 @@ pub fn readDocument(allocator: Allocator, r: anytype, decoder: anytype) !OwnedVa
     };
 }
 
+/// Options for a `Reader`.
+pub const ReaderOptions = struct {
+    buffer_size: usize = 4096,
+    namespace_aware: bool = true,
+};
+
 /// A streaming, pull-based XML parser wrapping a `std.io.Reader`.
 ///
 /// This parser behaves similarly to Go's `encoding/xml` package. It is a
@@ -247,13 +283,13 @@ pub fn readDocument(allocator: Allocator, r: anytype, decoder: anytype) !OwnedVa
 /// Since this parser wraps a `TokenReader`, the caveats on the `buffer_size`
 /// bounding the length of "non-splittable" content which are outlined in its
 /// documentation apply here as well.
-pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime DecoderType: type) type {
+pub fn Reader(comptime ReaderType: type, comptime DecoderType: type, comptime options: ReaderOptions) type {
     return struct {
         token_reader: TokenReaderType,
         /// A stack of element names enclosing the current context.
         element_names: ArrayListUnmanaged([]u8) = .{},
         /// The namespace context of the reader.
-        namespace_context: NamespaceContext = .{},
+        namespace_context: if (options.namespace_aware) NamespaceContext else UnawareNamespaceContext = .{},
         /// A pending token which has been read but has not yet been handled as
         /// part of an event.
         pending_token: ?Token = null,
@@ -276,7 +312,7 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
         allocator: Allocator,
 
         const Self = @This();
-        const TokenReaderType = TokenReader(buffer_size, ReaderType, DecoderType);
+        const TokenReaderType = TokenReader(options.buffer_size, ReaderType, DecoderType);
 
         pub const Error = error{
             CannotUndeclareNsPrefix,
@@ -373,6 +409,9 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
                         const current_attribute = &self.pending_event.element_start.current_attribute;
                         try current_attribute.value.appendSlice(event_allocator, try self.contentText(attribute_content.content));
                         if (attribute_content.final) {
+                            // We already checked for duplicate attribute names
+                            // when handling attribute_start, so we can be sure
+                            // no entry already exists with this key.
                             try self.pending_event.element_start.attributes.putNoClobber(event_allocator, current_attribute.name, .{
                                 .name = current_attribute.name,
                                 .value = try current_attribute.value.toOwnedSlice(event_allocator),
@@ -508,7 +547,7 @@ pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime D
 }
 
 test "complex document" {
-    try testValid(
+    try testValid(.{},
         \\<?xml version="1.0"?>
         \\<?some-pi?>
         \\<!-- A processing instruction with content follows -->
@@ -557,7 +596,7 @@ test "complex document" {
 }
 
 test "namespace handling" {
-    try testValid(
+    try testValid(.{},
         \\<a:root xmlns:a="urn:1">
         \\  <child xmlns="urn:2" xmlns:b="urn:3" attr="value">
         \\    <b:child xmlns:a="urn:4" b:attr="value">
@@ -592,9 +631,45 @@ test "namespace handling" {
     });
 }
 
-fn testValid(input: []const u8, expected_events: []const Event) !void {
+test "namespace-unaware namespace handling" {
+    try testValid(.{ .namespace_aware = false },
+        \\<a:root xmlns:a="urn:1">
+        \\  <child xmlns="urn:2" xmlns:b="urn:3" attr="value">
+        \\    <b:child xmlns:a="urn:4" b:attr="value">
+        \\      <a:child />
+        \\    </b:child>
+        \\  </child>
+        \\</a:root>
+    , &.{
+        .{ .element_start = .{ .name = .{ .local = "a:root" }, .attributes = &.{
+            .{ .name = .{ .local = "xmlns:a" }, .value = "urn:1" },
+        } } },
+        .{ .element_content = .{ .content = "\n  " } },
+        .{ .element_start = .{ .name = .{ .local = "child" }, .attributes = &.{
+            .{ .name = .{ .local = "xmlns" }, .value = "urn:2" },
+            .{ .name = .{ .local = "xmlns:b" }, .value = "urn:3" },
+            .{ .name = .{ .local = "attr" }, .value = "value" },
+        } } },
+        .{ .element_content = .{ .content = "\n    " } },
+        .{ .element_start = .{ .name = .{ .local = "b:child" }, .attributes = &.{
+            .{ .name = .{ .local = "xmlns:a" }, .value = "urn:4" },
+            .{ .name = .{ .local = "b:attr" }, .value = "value" },
+        } } },
+        .{ .element_content = .{ .content = "\n      " } },
+        .{ .element_start = .{ .name = .{ .local = "a:child" } } },
+        .{ .element_end = .{ .name = .{ .local = "a:child" } } },
+        .{ .element_content = .{ .content = "\n    " } },
+        .{ .element_end = .{ .name = .{ .local = "b:child" } } },
+        .{ .element_content = .{ .content = "\n  " } },
+        .{ .element_end = .{ .name = .{ .local = "child" } } },
+        .{ .element_content = .{ .content = "\n" } },
+        .{ .element_end = .{ .name = .{ .local = "a:root" } } },
+    });
+}
+
+fn testValid(comptime options: ReaderOptions, input: []const u8, expected_events: []const Event) !void {
     var input_stream = std.io.fixedBufferStream(input);
-    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{});
+    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, options);
     defer input_reader.deinit();
     var i: usize = 0;
     while (try input_reader.next()) |event| : (i += 1) {
@@ -635,7 +710,7 @@ test "complex document nodes" {
         \\
         \\
     );
-    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{});
+    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, .{});
     defer input_reader.deinit();
 
     try testing.expectEqualDeep(@as(?Event, .{ .xml_declaration = .{ .version = "1.0" } }), try input_reader.next());
@@ -684,7 +759,7 @@ test "namespace handling for nodes" {
         \\  </child>
         \\</a:root>
     );
-    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{});
+    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, .{});
     defer input_reader.deinit();
 
     var root_start = try input_reader.next();
@@ -734,7 +809,7 @@ test readDocument {
         \\
         \\
     );
-    var document_node = try readDocument(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{});
+    var document_node = try readDocument(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, .{});
     defer document_node.deinit();
 
     try testing.expectEqualDeep(Node.Document{ .version = "1.0", .children = &.{
