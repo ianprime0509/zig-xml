@@ -10,6 +10,7 @@ pub const TokenReader = @import("token_reader.zig").TokenReader;
 pub const Token = @import("token_reader.zig").Token;
 
 pub const reader = @import("reader.zig").reader;
+pub const readDocument = @import("reader.zig").readDocument;
 pub const Reader = @import("reader.zig").Reader;
 pub const QName = @import("reader.zig").QName;
 pub const Event = @import("reader.zig").Event;
