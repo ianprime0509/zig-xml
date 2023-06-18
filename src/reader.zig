@@ -239,11 +239,15 @@ pub fn readDocument(allocator: Allocator, r: anytype, decoder: anytype) !OwnedVa
 ///
 /// This parser behaves similarly to Go's `encoding/xml` package. It is a
 /// higher-level abstraction over a `TokenReader` which uses an internal
-/// allocator to keep track of additional context. It is intended to be a fully
-/// conformant non-validating parser according to the XML 1.0 specification,
-/// unlike the lower-level parsers in this library which sacrifice some
-/// well-formedness checks for efficiency.
-/// (TODO: this implementation is definitely not fully conformant yet; make it so)
+/// allocator to keep track of additional context. It performs additional
+/// well-formedness checks which the lower-level parsers cannot perform due to
+/// their design, such as ensuring element start and end tags match and
+/// attribute names are not duplicated. It is also able to process namespace
+/// information.
+///
+/// Since this parser wraps a `TokenReader`, the caveats on the `buffer_size`
+/// bounding the length of "non-splittable" content which are outlined in its
+/// documentation apply here as well.
 pub fn Reader(comptime TokenReaderType: type) type {
     return struct {
         token_reader: TokenReaderType,

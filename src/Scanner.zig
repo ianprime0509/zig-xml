@@ -8,6 +8,20 @@
 //! reference the input data using `pos` ranges (the meaning of `pos` depends
 //! on the meaning of the `len` passed to `next`).
 //!
+//! A higher-level parser which wants to do anything useful with the returned
+//! tokens will need to store the input text fed to the `next` function in some
+//! sort of buffer. If the document is stored entirely in memory, this buffer
+//! could be the document content itself. If the document is being read in a
+//! streaming manner, however, then an auxiliary buffer will be needed. To
+//! avoid requiring such higher-level APIs to maintain an unbounded input
+//! buffer, the `resetPos` function exists to reset `pos` to 0, if possible.
+//! The approach taken by `TokenReader` is to call `resetPos` after every
+//! token, and after reaching a state where space for a further codepoint is
+//! not guaranteed. With this approach, the length of the buffer bounds the
+//! maximum size of "unsplittable" content, such as element and attribute
+//! names, but not "splittable" content such as element text content and
+//! attribute values.
+//!
 //! Intentional (permanent) limitations (which can be addressed by
 //! higher-level APIs, such as `Reader`):
 //!

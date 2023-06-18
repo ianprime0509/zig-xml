@@ -108,7 +108,9 @@ pub fn tokenReader(reader: anytype, decoder: anytype) TokenReader(4096, @TypeOf(
 ///
 /// However, due to its use of an internal buffer and transcoding all input to
 /// UTF-8, it is not as efficient as a `Scanner` where these considerations are
-/// important.
+/// important. Additionally, `buffer_size` limits the maximum byte length of
+/// "unsplittable" content, such as element and attribute names (but not
+/// "splittable" content, such as element text content and attribute values).
 pub fn TokenReader(comptime buffer_size: usize, comptime ReaderType: type, comptime DecoderType: type) type {
     return struct {
         scanner: Scanner,
