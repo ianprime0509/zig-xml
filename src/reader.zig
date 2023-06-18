@@ -25,6 +25,29 @@ pub const QName = struct {
     ns: ?[]const u8 = null,
     local: []const u8,
 
+    /// Returns whether this name has the given namespace and local name.
+    pub fn is(self: QName, ns: ?[]const u8, local: []const u8) bool {
+        if (self.ns) |self_ns| {
+            if (!mem.eql(u8, self_ns, ns orelse return false)) {
+                return false;
+            }
+        } else if (ns != null) {
+            return false;
+        }
+        return mem.eql(u8, self.local, local);
+    }
+
+    test is {
+        try testing.expect((QName{ .local = "abc" }).is(null, "abc"));
+        try testing.expect((QName{ .ns = "http://example.com/ns/", .local = "abc" }).is("http://example.com/ns/", "abc"));
+        try testing.expect(!(QName{ .local = "abc" }).is(null, "def"));
+        try testing.expect(!(QName{ .local = "abc" }).is("http://example.com/ns/", "abc"));
+        try testing.expect(!(QName{ .ns = "http://example.com/ns/", .local = "abc" }).is(null, "abc"));
+        try testing.expect(!(QName{ .ns = "http://example.com/ns/", .local = "abc" }).is("http://example.com/ns2/", "abc"));
+        try testing.expect(!(QName{ .ns = "http://example.com/ns/", .local = "abc" }).is("http://example.com/ns/", "def"));
+        try testing.expect(!(QName{ .ns = "http://example.com/ns/", .local = "abc" }).is("http://example.com/ns2/", "def"));
+    }
+
     fn clone(self: QName, allocator: Allocator) !QName {
         const prefix = if (self.prefix) |prefix| try allocator.dupe(u8, prefix) else null;
         errdefer if (prefix) |p| allocator.free(p);
