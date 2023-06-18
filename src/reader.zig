@@ -183,9 +183,8 @@ const NamespaceContext = struct {
 };
 
 /// Returns a `Reader` wrapping a `std.io.Reader`.
-pub fn reader(allocator: Allocator, r: anytype, decoder: anytype) Reader(TokenReader(4096, @TypeOf(r), @TypeOf(decoder))) {
-    const TokenReaderType = TokenReader(4096, @TypeOf(r), @TypeOf(decoder));
-    return Reader(TokenReaderType).init(allocator, TokenReaderType.init(r, decoder));
+pub fn reader(allocator: Allocator, r: anytype, decoder: anytype) Reader(4096, @TypeOf(r), @TypeOf(decoder)) {
+    return Reader(4096, @TypeOf(r), @TypeOf(decoder)).init(allocator, r, decoder);
 }
 
 /// Reads a full XML document from a `std.io.Reader`.
@@ -248,7 +247,7 @@ pub fn readDocument(allocator: Allocator, r: anytype, decoder: anytype) !OwnedVa
 /// Since this parser wraps a `TokenReader`, the caveats on the `buffer_size`
 /// bounding the length of "non-splittable" content which are outlined in its
 /// documentation apply here as well.
-pub fn Reader(comptime TokenReaderType: type) type {
+pub fn Reader(comptime buffer_size: usize, comptime ReaderType: type, comptime DecoderType: type) type {
     return struct {
         token_reader: TokenReaderType,
         /// A stack of element names enclosing the current context.
@@ -277,6 +276,7 @@ pub fn Reader(comptime TokenReaderType: type) type {
         allocator: Allocator,
 
         const Self = @This();
+        const TokenReaderType = TokenReader(buffer_size, ReaderType, DecoderType);
 
         pub const Error = error{
             CannotUndeclareNsPrefix,
@@ -287,9 +287,9 @@ pub fn Reader(comptime TokenReaderType: type) type {
             UndeclaredNsPrefix,
         } || Allocator.Error || TokenReaderType.Error;
 
-        pub fn init(allocator: Allocator, token_reader: TokenReaderType) Self {
+        pub fn init(allocator: Allocator, r: ReaderType, decoder: DecoderType) Self {
             return .{
-                .token_reader = token_reader,
+                .token_reader = TokenReaderType.init(r, decoder),
                 .event_arena = ArenaAllocator.init(allocator),
                 .allocator = allocator,
             };
