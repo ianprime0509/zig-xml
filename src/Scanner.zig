@@ -174,8 +174,8 @@ pub const State = union(enum) {
     /// Start of document after BOM.
     start_after_bom,
 
-    /// Same as unknown_start, but also allows the xml and doctype declarations.
-    unknown_document_start,
+    /// Same as unknown_start, but also allows the XML declaration.
+    start_unknown_start,
     /// Start of a PI or XML declaration after '<?'.
     pi_or_xml_decl_start: struct { start: usize, xml_seen: TokenMatcher("xml") = .{} },
 
@@ -224,6 +224,8 @@ pub const State = union(enum) {
     /// Start of document after XML declaration.
     start_after_xml_decl,
 
+    /// Top-level document content (outside the root element).
+    document_content,
     /// A '<' has been encountered, but we don't know if it's an element, comment, etc.
     unknown_start,
     /// A '<!' has been encountered.
@@ -371,7 +373,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             self.state = .start_after_bom;
             return .ok;
         } else if (c == '<') {
-            self.state = .unknown_document_start;
+            self.state = .start_unknown_start;
             return .ok;
         } else {
             return error.SyntaxError;
@@ -380,13 +382,13 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         .start_after_bom => if (syntax.isSpace(c)) {
             return .ok;
         } else if (c == '<') {
-            self.state = .unknown_document_start;
+            self.state = .start_unknown_start;
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .unknown_document_start => if (syntax.isNameStartChar(c)) {
+        .start_unknown_start => if (syntax.isNameStartChar(c)) {
             self.state = .{ .element_start_name = .{ .start = self.pos } };
             return .ok;
         } else if (c == '?') {
@@ -640,6 +642,15 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
+        .document_content => if (syntax.isSpace(c)) {
+            return .ok;
+        } else if (c == '<') {
+            self.state = .unknown_start;
+            return .ok;
+        } else {
+            return error.SyntaxError;
+        },
+
         .unknown_start => if (syntax.isNameStartChar(c) and !self.seen_root_element) {
             self.state = .{ .element_start_name = .{ .start = self.pos } };
             return .ok;
@@ -694,7 +705,11 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         },
 
         .comment_before_end => if (c == '>') {
-            self.state = .{ .content = .{ .start = self.pos + len } };
+            if (self.depth == 0) {
+                self.state = .document_content;
+            } else {
+                self.state = .{ .content = .{ .start = self.pos + len } };
+            }
             return .ok;
         } else {
             return error.SyntaxError;
@@ -751,7 +766,11 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         },
 
         .pi_maybe_end => |state| if (c == '>') {
-            self.state = .{ .content = .{ .start = self.pos + len } };
+            if (self.depth == 0) {
+                self.state = .document_content;
+            } else {
+                self.state = .{ .content = .{ .start = self.pos + len } };
+            }
             return .{ .pi_content = .{ .content = .{ .start = state.start, .end = state.end }, .final = true } };
         } else if (syntax.isChar(c)) {
             self.state = .{ .pi_content = .{ .start = state.start } };
@@ -833,7 +852,11 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             if (self.depth == 0) {
                 self.seen_root_element = true;
             }
-            self.state = .{ .content = .{ .start = self.pos + len } };
+            if (self.depth == 0) {
+                self.state = .document_content;
+            } else {
+                self.state = .{ .content = .{ .start = self.pos + len } };
+            }
             return .element_end_empty;
         } else {
             return error.SyntaxError;
@@ -954,7 +977,11 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             if (self.depth == 0) {
                 self.seen_root_element = true;
             }
-            self.state = .{ .content = .{ .start = self.pos + len } };
+            if (self.depth == 0) {
+                self.state = .document_content;
+            } else {
+                self.state = .{ .content = .{ .start = self.pos + len } };
+            }
             return .{ .element_end = .{ .name = .{ .start = state.start, .end = self.pos } } };
         } else {
             return error.SyntaxError;
@@ -967,7 +994,11 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             if (self.depth == 0) {
                 self.seen_root_element = true;
             }
-            self.state = .{ .content = .{ .start = self.pos + len } };
+            if (self.depth == 0) {
+                self.state = .document_content;
+            } else {
+                self.state = .{ .content = .{ .start = self.pos + len } };
+            }
             return .ok;
         } else {
             return error.SyntaxError;
@@ -976,16 +1007,15 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         .content => |state| if (c == '<') {
             self.state = .unknown_start;
             const range = Range{ .start = state.start, .end = self.pos };
-            if (self.depth == 0 or range.isEmpty()) {
+            if (range.isEmpty()) {
                 // Do not report empty text content between elements, e.g.
                 // <e1></e1><e2></e2> (there is no text content between or
-                // within e1 and e2). Also do not report text content outside
-                // the root element (which will just be whitespace).
+                // within e1 and e2).
                 return .ok;
             } else {
                 return .{ .element_content = .{ .content = .{ .text = range } } };
             }
-        } else if (self.depth > 0 and c == '&') {
+        } else if (c == '&') {
             const range = Range{ .start = state.start, .end = self.pos };
             self.state = .content_ref_start;
             if (range.isEmpty()) {
@@ -993,13 +1023,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             } else {
                 return .{ .element_content = .{ .content = .{ .text = range } } };
             }
-        } else if (self.depth > 0 and syntax.isChar(c)) {
+        } else if (syntax.isChar(c)) {
             // Textual content is not allowed outside the root element.
-            return .ok;
-        } else if (syntax.isSpace(c)) {
-            // Spaces are allowed outside the root element. Another check in
-            // this state will prevent a text token from being emitted at the
-            // end of the whitespace.
             return .ok;
         } else {
             return error.SyntaxError;
@@ -1063,7 +1088,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
 /// the scanner is not in a valid state to handle this (for example, if this
 /// is called while in the middle of element content).
 pub fn endInput(self: *Scanner) error{UnexpectedEndOfInput}!void {
-    if (self.state != .content or self.depth != 0 or !self.seen_root_element) {
+    if (self.state != .document_content or !self.seen_root_element) {
         return error.UnexpectedEndOfInput;
     }
 }
@@ -1436,7 +1461,7 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
         .start,
         .start_after_bom,
 
-        .unknown_document_start,
+        .start_unknown_start,
 
         .xml_decl,
         .xml_decl_version_name,
@@ -1448,6 +1473,7 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
         .xml_decl_end,
         .start_after_xml_decl,
 
+        .document_content,
         .unknown_start,
         .unknown_start_bang,
 
