@@ -86,9 +86,23 @@ const max_encoded_codepoint_len = 4;
 
 /// Wraps a `std.io.Reader` in a `TokenReader` with the default buffer size
 /// (4096).
-pub fn tokenReader(reader: anytype, decoder: anytype) TokenReader(4096, @TypeOf(reader), @TypeOf(decoder)) {
-    return TokenReader(4096, @TypeOf(reader), @TypeOf(decoder)).init(reader, decoder);
+pub fn tokenReader(
+    reader: anytype,
+    decoder: anytype,
+    comptime options: TokenReaderOptions,
+) TokenReader(@TypeOf(reader), @TypeOf(decoder), options) {
+    return TokenReader(@TypeOf(reader), @TypeOf(decoder), options).init(reader, decoder);
 }
+
+/// Options for a `TokenReader`.
+pub const TokenReaderOptions = struct {
+    /// The size of the internal buffer.
+    ///
+    /// This limits the byte length of "non-splittable" content, such as
+    /// element and attribute names. Longer such content will result in
+    /// `error.Overflow`.
+    buffer_size: usize = 4096,
+};
 
 /// An XML parser which wraps a `std.io.Reader` and returns low-level tokens.
 ///
@@ -111,7 +125,11 @@ pub fn tokenReader(reader: anytype, decoder: anytype) TokenReader(4096, @TypeOf(
 /// important. Additionally, `buffer_size` limits the maximum byte length of
 /// "unsplittable" content, such as element and attribute names (but not
 /// "splittable" content, such as element text content and attribute values).
-pub fn TokenReader(comptime buffer_size: usize, comptime ReaderType: type, comptime DecoderType: type) type {
+pub fn TokenReader(
+    comptime ReaderType: type,
+    comptime DecoderType: type,
+    comptime options: TokenReaderOptions,
+) type {
     return struct {
         scanner: Scanner,
         reader: ReaderType,
@@ -120,7 +138,7 @@ pub fn TokenReader(comptime buffer_size: usize, comptime ReaderType: type, compt
         ///
         /// Events may reference this buffer via slices. The contents of the
         /// buffer (up until `scanner.pos`) are always valid UTF-8.
-        buffer: [buffer_size]u8 = undefined,
+        buffer: [options.buffer_size]u8 = undefined,
         /// Whether the last codepoint read was a carriage return (`\r`).
         ///
         /// This is relevant for line break normalization.
@@ -165,7 +183,7 @@ pub fn TokenReader(comptime buffer_size: usize, comptime ReaderType: type, compt
             }
 
             while (true) {
-                if (self.scanner.pos + max_encoded_codepoint_len >= buffer_size) {
+                if (self.scanner.pos + max_encoded_codepoint_len >= self.buffer.len) {
                     if (self.scanner.resetPos()) |token| {
                         if (token != .ok) {
                             return try self.bufToken(token);
@@ -182,7 +200,7 @@ pub fn TokenReader(comptime buffer_size: usize, comptime ReaderType: type, compt
                     return null;
                 };
                 const c_len = unicode.utf8CodepointSequenceLength(c) catch unreachable;
-                if (self.scanner.pos + c_len >= buffer_size) {
+                if (self.scanner.pos + c_len >= self.buffer.len) {
                     return error.Overflow;
                 }
                 _ = unicode.utf8Encode(c, self.buffer[self.scanner.pos .. self.scanner.pos + c_len]) catch unreachable;
@@ -287,7 +305,7 @@ pub fn TokenReader(comptime buffer_size: usize, comptime ReaderType: type, compt
 }
 
 test "line endings" {
-    try testValid("<root>Line 1\rLine 2\r\nLine 3\nLine 4\n\rLine 6\r\n\rLine 8</root>", &.{
+    try testValid(.{}, "<root>Line 1\rLine 2\r\nLine 3\nLine 4\n\rLine 6\r\n\rLine 8</root>", &.{
         .{ .element_start = .{ .name = "root" } },
         .{ .element_content = .{ .content = .{ .text = "Line 1\nLine 2\nLine 3\nLine 4\n\nLine 6\n\nLine 8" } } },
         .{ .element_end = .{ .name = "root" } },
@@ -295,7 +313,7 @@ test "line endings" {
 }
 
 test "attribute value normalization" {
-    try testValid("<root attr=' Line 1\rLine 2\r\nLine 3\nLine 4\t\tMore    content\n\rLine 6\r\n\rLine 8 '/>", &.{
+    try testValid(.{}, "<root attr=' Line 1\rLine 2\r\nLine 3\nLine 4\t\tMore    content\n\rLine 6\r\n\rLine 8 '/>", &.{
         .{ .element_start = .{ .name = "root" } },
         .{ .attribute_start = .{ .name = "attr" } },
         .{ .attribute_content = .{
@@ -307,7 +325,7 @@ test "attribute value normalization" {
 }
 
 test "complex document" {
-    try testValid(
+    try testValid(.{},
         \\<?xml version="1.0"?>
         \\<?some-pi?>
         \\<!-- A processing instruction with content follows -->
@@ -361,9 +379,9 @@ test "complex document" {
     });
 }
 
-fn testValid(input: []const u8, expected_tokens: []const Token) !void {
+fn testValid(comptime options: TokenReaderOptions, input: []const u8, expected_tokens: []const Token) !void {
     var input_stream = std.io.fixedBufferStream(input);
-    var input_reader = tokenReader(input_stream.reader(), encoding.Utf8Decoder{});
+    var input_reader = tokenReader(input_stream.reader(), encoding.Utf8Decoder{}, options);
     var i: usize = 0;
     while (try input_reader.next()) |token| : (i += 1) {
         if (i >= expected_tokens.len) {

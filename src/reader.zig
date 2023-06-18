@@ -266,7 +266,17 @@ pub fn readDocument(
 
 /// Options for a `Reader`.
 pub const ReaderOptions = struct {
+    /// The size of the internal buffer.
+    ///
+    /// This limits the byte length of "non-splittable" content, such as
+    /// element and attribute names. Longer such content will result in
+    /// `error.Overflow`.
     buffer_size: usize = 4096,
+    /// Whether namespace information should be processed.
+    ///
+    /// If this is false, then `QName`s in the returned events will have only
+    /// their `local` field populated, containing the full name of the element
+    /// or attribute.
     namespace_aware: bool = true,
 };
 
@@ -283,7 +293,11 @@ pub const ReaderOptions = struct {
 /// Since this parser wraps a `TokenReader`, the caveats on the `buffer_size`
 /// bounding the length of "non-splittable" content which are outlined in its
 /// documentation apply here as well.
-pub fn Reader(comptime ReaderType: type, comptime DecoderType: type, comptime options: ReaderOptions) type {
+pub fn Reader(
+    comptime ReaderType: type,
+    comptime DecoderType: type,
+    comptime options: ReaderOptions,
+) type {
     return struct {
         token_reader: TokenReaderType,
         /// A stack of element names enclosing the current context.
@@ -312,7 +326,9 @@ pub fn Reader(comptime ReaderType: type, comptime DecoderType: type, comptime op
         allocator: Allocator,
 
         const Self = @This();
-        const TokenReaderType = TokenReader(options.buffer_size, ReaderType, DecoderType);
+        const TokenReaderType = TokenReader(ReaderType, DecoderType, .{
+            .buffer_size = options.buffer_size,
+        });
 
         pub const Error = error{
             CannotUndeclareNsPrefix,
@@ -629,6 +645,10 @@ test "namespace handling" {
         .{ .element_content = .{ .content = "\n" } },
         .{ .element_end = .{ .name = .{ .prefix = "a", .ns = "urn:1", .local = "root" } } },
     });
+    try testInvalid(.{}, "<a:root />", error.UndeclaredNsPrefix);
+    try testInvalid(.{}, "<: />", error.InvalidQName);
+    try testInvalid(.{}, "<a: />", error.InvalidQName);
+    try testInvalid(.{}, "<:a />", error.InvalidQName);
 }
 
 test "namespace-unaware namespace handling" {
@@ -665,6 +685,22 @@ test "namespace-unaware namespace handling" {
         .{ .element_content = .{ .content = "\n" } },
         .{ .element_end = .{ .name = .{ .local = "a:root" } } },
     });
+    try testValid(.{ .namespace_aware = false }, "<a:root />", &.{
+        .{ .element_start = .{ .name = .{ .local = "a:root" } } },
+        .{ .element_end = .{ .name = .{ .local = "a:root" } } },
+    });
+    try testValid(.{ .namespace_aware = false }, "<: />", &.{
+        .{ .element_start = .{ .name = .{ .local = ":" } } },
+        .{ .element_end = .{ .name = .{ .local = ":" } } },
+    });
+    try testValid(.{ .namespace_aware = false }, "<a: />", &.{
+        .{ .element_start = .{ .name = .{ .local = "a:" } } },
+        .{ .element_end = .{ .name = .{ .local = "a:" } } },
+    });
+    try testValid(.{ .namespace_aware = false }, "<:a />", &.{
+        .{ .element_start = .{ .name = .{ .local = ":a" } } },
+        .{ .element_end = .{ .name = .{ .local = ":a" } } },
+    });
 }
 
 fn testValid(comptime options: ReaderOptions, input: []const u8, expected_events: []const Event) !void {
@@ -685,6 +721,15 @@ fn testValid(comptime options: ReaderOptions, input: []const u8, expected_events
     if (i != expected_events.len) {
         std.debug.print("Expected {} events, found {}\n", .{ expected_events.len, i });
         return error.TestFailed;
+    }
+}
+
+fn testInvalid(comptime options: ReaderOptions, input: []const u8, expected_error: anyerror) !void {
+    var input_stream = std.io.fixedBufferStream(input);
+    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, options);
+    defer input_reader.deinit();
+    while (input_reader.next()) |_| {} else |err| {
+        try testing.expectEqual(expected_error, err);
     }
 }
 
