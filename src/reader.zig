@@ -604,7 +604,7 @@ fn Children(comptime ReaderType: type) type {
 
         /// Returns the next event.
         ///
-        /// This function must not be called after it initially returns `null`.
+        /// This function must not be called after it initially returns null.
         pub fn next(self: Self) ReaderType.Error!?Event {
             return switch (try self.reader.next() orelse return null) {
                 .element_end => |element_end| if (self.reader.element_names.items.len >= self.start_depth) .{ .element_end = element_end } else null,
@@ -614,8 +614,17 @@ fn Children(comptime ReaderType: type) type {
 
         /// Returns an iterator over the remaining children of the current
         /// element.
+        ///
+        /// This may not be used after `next` returns null.
         pub fn children(self: Self) Self {
             return self.reader.children();
+        }
+
+        /// Skips the remaining children.
+        ///
+        /// `next` and `children` must not be used after this.
+        pub fn skip(self: Self) ReaderType.Error!void {
+            while (try self.next()) |_| {}
         }
     };
 }
@@ -972,4 +981,21 @@ test "children" {
     try testing.expectEqual(@as(?Event, null), try child2_children.next());
     try testing.expectEqualDeep(@as(?Event, .{ .element_content = .{ .content = "\n" } }), try root_children.next());
     try testing.expectEqual(@as(?Event, null), try root_children.next());
+}
+
+test "skip children" {
+    var input_stream = std.io.fixedBufferStream(
+        \\<root>
+        \\  Hello, world!
+        \\  <child1 attr="value">Some content.</child1>
+        \\  <child2><!-- Comment --><child3/></child2>
+        \\</root>
+    );
+    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, .{});
+    defer input_reader.deinit();
+
+    try testing.expectEqualDeep(@as(?Event, .{ .element_start = .{ .name = .{ .local = "root" } } }), try input_reader.next());
+    const root_children = input_reader.children();
+    try root_children.skip();
+    try testing.expectEqual(@as(?Event, null), try input_reader.next());
 }
