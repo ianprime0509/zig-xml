@@ -551,10 +551,10 @@ pub fn Reader(
 
         fn nextElementNode(self: *Self, allocator: Allocator, element_start: Event.ElementStart) Error!Node.Element {
             const name = try element_start.name.clone(allocator);
-            var children = ArrayListUnmanaged(Node){};
-            try children.ensureTotalCapacity(allocator, element_start.attributes.len);
+            var element_children = ArrayListUnmanaged(Node){};
+            try element_children.ensureTotalCapacity(allocator, element_start.attributes.len);
             for (element_start.attributes) |attr| {
-                children.appendAssumeCapacity(.{ .attribute = .{
+                element_children.appendAssumeCapacity(.{ .attribute = .{
                     .name = try attr.name.clone(allocator),
                     .value = try allocator.dupe(u8, attr.value),
                 } });
@@ -562,25 +562,60 @@ pub fn Reader(
             var current_content = ArrayListUnmanaged(u8){};
             while (try self.next()) |event| {
                 if (event != .element_content and current_content.items.len > 0) {
-                    try children.append(allocator, .{ .text = .{ .content = try current_content.toOwnedSlice(allocator) } });
+                    try element_children.append(allocator, .{ .text = .{ .content = try current_content.toOwnedSlice(allocator) } });
                 }
                 switch (event) {
                     .xml_declaration => unreachable,
-                    .element_start => |sub_element_start| try children.append(allocator, .{
+                    .element_start => |sub_element_start| try element_children.append(allocator, .{
                         .element = try self.nextElementNode(allocator, sub_element_start),
                     }),
                     .element_content => |element_content| try current_content.appendSlice(allocator, element_content.content),
-                    .element_end => return .{ .name = name, .children = children.items },
-                    .comment => |comment| try children.append(allocator, .{ .comment = .{
+                    .element_end => return .{ .name = name, .children = element_children.items },
+                    .comment => |comment| try element_children.append(allocator, .{ .comment = .{
                         .content = try allocator.dupe(u8, comment.content),
                     } }),
-                    .pi => |pi| try children.append(allocator, .{ .pi = .{
+                    .pi => |pi| try element_children.append(allocator, .{ .pi = .{
                         .target = try allocator.dupe(u8, pi.target),
                         .content = try allocator.dupe(u8, pi.content),
                     } }),
                 }
             }
             unreachable;
+        }
+
+        /// Returns an iterator over the remaining children of the current
+        /// element.
+        ///
+        /// Note that, since the returned iterator's `next` function calls the
+        /// `next` function of this reader internally, such calls will
+        /// invalidate any event returned prior to calling this function.
+        pub fn children(self: *Self) Children(Self) {
+            return .{ .reader = self, .start_depth = self.element_names.items.len };
+        }
+    };
+}
+
+fn Children(comptime ReaderType: type) type {
+    return struct {
+        reader: *ReaderType,
+        start_depth: usize,
+
+        const Self = @This();
+
+        /// Returns the next event.
+        ///
+        /// This function must not be called after it initially returns `null`.
+        pub fn next(self: Self) ReaderType.Error!?Event {
+            return switch (try self.reader.next() orelse return null) {
+                .element_end => |element_end| if (self.reader.element_names.items.len >= self.start_depth) .{ .element_end = element_end } else null,
+                else => |event| event,
+            };
+        }
+
+        /// Returns an iterator over the remaining children of the current
+        /// element.
+        pub fn children(self: Self) Self {
+            return self.reader.children();
         }
     };
 }
@@ -905,4 +940,36 @@ test readDocument {
         .{ .comment = .{ .content = " Comments are allowed after the end of the root element " } },
         .{ .pi = .{ .target = "comment", .content = "So are PIs " } },
     } }, document_node.value);
+}
+
+test "children" {
+    var input_stream = std.io.fixedBufferStream(
+        \\<root>
+        \\  Hello, world!
+        \\  <child1 attr="value">Some content.</child1>
+        \\  <child2><!-- Comment --><child3/></child2>
+        \\</root>
+    );
+    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, .{});
+    defer input_reader.deinit();
+
+    try testing.expectEqualDeep(@as(?Event, .{ .element_start = .{ .name = .{ .local = "root" } } }), try input_reader.next());
+    const root_children = input_reader.children();
+    try testing.expectEqualDeep(@as(?Event, .{ .element_content = .{ .content = "\n  Hello, world!\n  " } }), try root_children.next());
+    try testing.expectEqualDeep(@as(?Event, .{ .element_start = .{ .name = .{ .local = "child1" }, .attributes = &.{
+        .{ .name = .{ .local = "attr" }, .value = "value" },
+    } } }), try root_children.next());
+    const child1_children = root_children.children();
+    try testing.expectEqualDeep(@as(?Event, .{ .element_content = .{ .content = "Some content." } }), try child1_children.next());
+    try testing.expectEqual(@as(?Event, null), try child1_children.next());
+    try testing.expectEqualDeep(@as(?Event, .{ .element_content = .{ .content = "\n  " } }), try root_children.next());
+    try testing.expectEqualDeep(@as(?Event, .{ .element_start = .{ .name = .{ .local = "child2" } } }), try root_children.next());
+    const child2_children = root_children.children();
+    try testing.expectEqualDeep(@as(?Event, .{ .comment = .{ .content = " Comment " } }), try child2_children.next());
+    try testing.expectEqualDeep(@as(?Event, .{ .element_start = .{ .name = .{ .local = "child3" } } }), try child2_children.next());
+    const child3_children = child2_children.children();
+    try testing.expectEqual(@as(?Event, null), try child3_children.next());
+    try testing.expectEqual(@as(?Event, null), try child2_children.next());
+    try testing.expectEqualDeep(@as(?Event, .{ .element_content = .{ .content = "\n" } }), try root_children.next());
+    try testing.expectEqual(@as(?Event, null), try root_children.next());
 }

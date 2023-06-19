@@ -831,10 +831,12 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         .element_start_name => |state| if (syntax.isNameChar(c)) {
             return .ok;
         } else if (syntax.isSpace(c)) {
+            self.depth += 1;
             const name = Range{ .start = state.start, .end = self.pos };
             self.state = .element_start_after_name;
             return .{ .element_start = .{ .name = name } };
         } else if (c == '/') {
+            self.depth += 1;
             const name = Range{ .start = state.start, .end = self.pos };
             self.state = .element_start_empty;
             return .{ .element_start = .{ .name = name } };
@@ -855,7 +857,6 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             self.state = .element_start_empty;
             return .ok;
         } else if (c == '>') {
-            self.depth += 1;
             self.state = .{ .content = .{ .start = self.pos + len } };
             return .ok;
         } else {
@@ -863,6 +864,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         },
 
         .element_start_empty => if (c == '>') {
+            self.depth -= 1;
             if (self.depth == 0) {
                 self.seen_root_element = true;
             }
@@ -984,6 +986,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         .element_end_name => |state| if (syntax.isNameChar(c)) {
             return .ok;
         } else if (syntax.isSpace(c)) {
+            self.depth -= 1;
             self.state = .element_end_after_name;
             return .{ .element_end = .{ .name = .{ .start = state.start, .end = self.pos } } };
         } else if (c == '>') {
