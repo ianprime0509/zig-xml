@@ -5,7 +5,9 @@ as possible, providing APIs at varying levels of abstraction to best suit the
 needs of different users.
 
 **Warning:** this library is still in early development. Bugs and breaking
-changes are highly likely.
+changes are highly likely. If you need a stable and well-tested XML library,
+[zig-libxml2](https://github.com/mitchellh/zig-libxml2) is probably your best
+bet (build setup for the popular libxml2 C library).
 
 ## Reading XML
 
