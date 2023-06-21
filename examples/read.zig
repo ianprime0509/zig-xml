@@ -31,6 +31,7 @@ pub fn main() !void {
 
 fn printEvent(out: anytype, event: xml.Event) !void {
     switch (event) {
+        .xml_declaration => |xml_declaration| try out.print("<!xml {s} {?s} {?}\n", .{ xml_declaration.version, xml_declaration.encoding, xml_declaration.standalone }),
         .element_start => |element_start| {
             try out.print("<{?s}({?s}):{s}\n", .{ element_start.name.prefix, element_start.name.ns, element_start.name.local });
             for (element_start.attributes) |attr| {
