@@ -295,6 +295,13 @@ pub const ReaderOptions = struct {
     /// element and attribute names. Longer such content will result in
     /// `error.Overflow`.
     buffer_size: usize = 4096,
+    /// Whether to normalize line endings and attribute values according to the
+    /// XML specification.
+    ///
+    /// If this is set to false, no normalization will be done: for example,
+    /// the line ending sequence `\r\n` will appear as-is in returned events
+    /// rather than the normalized `\n`.
+    enable_normalization: bool = true,
     /// Whether namespace information should be processed.
     ///
     /// If this is false, then `QName`s in the returned events will have only

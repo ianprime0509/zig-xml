@@ -102,6 +102,13 @@ pub const TokenReaderOptions = struct {
     /// element and attribute names. Longer such content will result in
     /// `error.Overflow`.
     buffer_size: usize = 4096,
+    /// Whether to normalize line endings and attribute values according to the
+    /// XML specification.
+    ///
+    /// If this is set to false, no normalization will be done: for example,
+    /// the line ending sequence `\r\n` will appear as-is in returned tokens
+    /// rather than the normalized `\n`.
+    enable_normalization: bool = true,
 };
 
 /// An XML parser which wraps a `std.io.Reader` and returns low-level tokens.
@@ -142,7 +149,7 @@ pub fn TokenReader(
         /// Whether the last codepoint read was a carriage return (`\r`).
         ///
         /// This is relevant for line break normalization.
-        after_cr: bool = false,
+        after_cr: if (options.enable_normalization) bool else void = if (options.enable_normalization) false,
 
         const Self = @This();
 
@@ -211,7 +218,9 @@ pub fn TokenReader(
             }
         }
 
-        fn nextCodepoint(self: *Self) !?u21 {
+        const nextCodepoint = if (options.enable_normalization) nextCodepointNormalized else nextCodepointRaw;
+
+        fn nextCodepointNormalized(self: *Self) !?u21 {
             var b = (try self.nextCodepointRaw()) orelse return null;
             if (self.after_cr) {
                 self.after_cr = false;
@@ -304,20 +313,31 @@ pub fn TokenReader(
     };
 }
 
-test "line endings" {
+test "normalization" {
     try testValid(.{}, "<root>Line 1\rLine 2\r\nLine 3\nLine 4\n\rLine 6\r\n\rLine 8</root>", &.{
         .{ .element_start = .{ .name = "root" } },
         .{ .element_content = .{ .content = .{ .text = "Line 1\nLine 2\nLine 3\nLine 4\n\nLine 6\n\nLine 8" } } },
         .{ .element_end = .{ .name = "root" } },
     });
-}
-
-test "attribute value normalization" {
     try testValid(.{}, "<root attr=' Line 1\rLine 2\r\nLine 3\nLine 4\t\tMore    content\n\rLine 6\r\n\rLine 8 '/>", &.{
         .{ .element_start = .{ .name = "root" } },
         .{ .attribute_start = .{ .name = "attr" } },
         .{ .attribute_content = .{
             .content = .{ .text = " Line 1 Line 2 Line 3 Line 4  More    content  Line 6  Line 8 " },
+            .final = true,
+        } },
+        .element_end_empty,
+    });
+    try testValid(.{ .enable_normalization = false }, "<root>Line 1\rLine 2\r\nLine 3\nLine 4\n\rLine 6\r\n\rLine 8</root>", &.{
+        .{ .element_start = .{ .name = "root" } },
+        .{ .element_content = .{ .content = .{ .text = "Line 1\rLine 2\r\nLine 3\nLine 4\n\rLine 6\r\n\rLine 8" } } },
+        .{ .element_end = .{ .name = "root" } },
+    });
+    try testValid(.{ .enable_normalization = false }, "<root attr=' Line 1\rLine 2\r\nLine 3\nLine 4\t\tMore    content\n\rLine 6\r\n\rLine 8 '/>", &.{
+        .{ .element_start = .{ .name = "root" } },
+        .{ .attribute_start = .{ .name = "attr" } },
+        .{ .attribute_content = .{
+            .content = .{ .text = " Line 1\rLine 2\r\nLine 3\nLine 4\t\tMore    content\n\rLine 6\r\n\rLine 8 " },
             .final = true,
         } },
         .element_end_empty,
