@@ -636,7 +636,7 @@ fn Children(comptime ReaderType: type) type {
     };
 }
 
-test "complex document" {
+test Reader {
     try testValid(.{},
         \\<?xml version="1.0"?>
         \\<?some-pi?>
@@ -723,9 +723,7 @@ test "namespace handling" {
     try testInvalid(.{}, "<: />", error.InvalidQName);
     try testInvalid(.{}, "<a: />", error.InvalidQName);
     try testInvalid(.{}, "<:a />", error.InvalidQName);
-}
 
-test "namespace-unaware namespace handling" {
     try testValid(.{ .namespace_aware = false },
         \\<a:root xmlns:a="urn:1">
         \\  <child xmlns="urn:2" xmlns:b="urn:3" attr="value">
@@ -807,7 +805,7 @@ fn testInvalid(comptime options: ReaderOptions, input: []const u8, expected_erro
     }
 }
 
-test "complex document nodes" {
+test "nextNode" {
     // See https://github.com/ziglang/zig/pull/14981
     if (true) return error.SkipZigTest;
 
@@ -865,7 +863,7 @@ test "complex document nodes" {
     try testing.expect(try input_reader.next() == null);
 }
 
-test "namespace handling for nodes" {
+test "nextNode namespace handling" {
     // See https://github.com/ziglang/zig/pull/14981
     if (true) return error.SkipZigTest;
 
@@ -958,7 +956,7 @@ test readDocument {
     } }, document_node.value);
 }
 
-test "children" {
+test Children {
     var input_stream = std.io.fixedBufferStream(
         \\<root>
         \\  Hello, world!

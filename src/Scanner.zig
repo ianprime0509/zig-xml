@@ -1110,6 +1110,61 @@ pub fn endInput(self: *Scanner) error{UnexpectedEndOfInput}!void {
     }
 }
 
+test Scanner {
+    try testValid(
+        \\<?xml version="1.0"?>
+        \\<?some-pi?>
+        \\<!-- A processing instruction with content follows -->
+        \\<?some-pi-with-content content?>
+        \\<root>
+        \\  <p class="test">Hello, <![CDATA[world!]]></p>
+        \\  <line />
+        \\  <?another-pi?>
+        \\  Text content goes here.
+        \\  <div><p>&amp;</p></div>
+        \\</root>
+        \\<!-- Comments are allowed after the end of the root element -->
+        \\
+        \\<?comment So are PIs ?>
+        \\
+        \\
+    , &.{
+        .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 } } },
+        .{ .pi_start = .{ .target = .{ .start = 24, .end = 31 } } }, // some-pi
+        .{ .pi_content = .{ .content = .{ .start = 31, .end = 31 }, .final = true } },
+        .comment_start,
+        .{ .comment_content = .{ .content = .{ .start = 38, .end = 85 }, .final = true } },
+        .{ .pi_start = .{ .target = .{ .start = 91, .end = 111 } } }, // some-pi-with-content
+        .{ .pi_content = .{ .content = .{ .start = 112, .end = 119 }, .final = true } },
+        .{ .element_start = .{ .name = .{ .start = 123, .end = 127 } } }, // root
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 128, .end = 131 } } } },
+        .{ .element_start = .{ .name = .{ .start = 132, .end = 133 } } }, // p
+        .{ .attribute_start = .{ .name = .{ .start = 134, .end = 139 } } },
+        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 141, .end = 145 } }, .final = true } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 147, .end = 154 } } } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 163, .end = 169 } } } },
+        .{ .element_end = .{ .name = .{ .start = 174, .end = 175 } } }, // /p
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 176, .end = 179 } } } },
+        .{ .element_start = .{ .name = .{ .start = 180, .end = 184 } } }, // line
+        .element_end_empty,
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 187, .end = 190 } } } },
+        .{ .pi_start = .{ .target = .{ .start = 192, .end = 202 } } }, // another-pi
+        .{ .pi_content = .{ .content = .{ .start = 202, .end = 202 }, .final = true } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 204, .end = 233 } } } },
+        .{ .element_start = .{ .name = .{ .start = 234, .end = 237 } } }, // div
+        .{ .element_start = .{ .name = .{ .start = 239, .end = 240 } } }, // p
+        .{ .element_content = .{ .content = .{ .entity = .{ .start = 242, .end = 245 } } } },
+        .{ .element_end = .{ .name = .{ .start = 248, .end = 249 } } }, // /p
+        .{ .element_end = .{ .name = .{ .start = 252, .end = 255 } } }, // /div
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 256, .end = 257 } } } },
+        .{ .element_end = .{ .name = .{ .start = 259, .end = 263 } } }, // /root
+        .comment_start,
+        .{ .comment_content = .{ .content = .{ .start = 269, .end = 325 }, .final = true } },
+        .{ .pi_start = .{ .target = .{ .start = 332, .end = 339 } } }, // comment
+        .{ .pi_content = .{ .content = .{ .start = 340, .end = 351 }, .final = true } },
+    });
+}
+
 test "BOM" {
     try testValid("\u{FEFF}<element/>", &.{
         .{ .element_start = .{ .name = .{ .start = 4, .end = 11 } } },
@@ -1297,61 +1352,6 @@ test "PI at document start" {
         .{ .pi_content = .{ .content = .{ .start = 6, .end = 6 }, .final = true } },
         .{ .element_start = .{ .name = .{ .start = 9, .end = 13 } } },
         .element_end_empty,
-    });
-}
-
-test "complex document" {
-    try testValid(
-        \\<?xml version="1.0"?>
-        \\<?some-pi?>
-        \\<!-- A processing instruction with content follows -->
-        \\<?some-pi-with-content content?>
-        \\<root>
-        \\  <p class="test">Hello, <![CDATA[world!]]></p>
-        \\  <line />
-        \\  <?another-pi?>
-        \\  Text content goes here.
-        \\  <div><p>&amp;</p></div>
-        \\</root>
-        \\<!-- Comments are allowed after the end of the root element -->
-        \\
-        \\<?comment So are PIs ?>
-        \\
-        \\
-    , &.{
-        .{ .xml_declaration = .{ .version = .{ .start = 15, .end = 18 } } },
-        .{ .pi_start = .{ .target = .{ .start = 24, .end = 31 } } }, // some-pi
-        .{ .pi_content = .{ .content = .{ .start = 31, .end = 31 }, .final = true } },
-        .comment_start,
-        .{ .comment_content = .{ .content = .{ .start = 38, .end = 85 }, .final = true } },
-        .{ .pi_start = .{ .target = .{ .start = 91, .end = 111 } } }, // some-pi-with-content
-        .{ .pi_content = .{ .content = .{ .start = 112, .end = 119 }, .final = true } },
-        .{ .element_start = .{ .name = .{ .start = 123, .end = 127 } } }, // root
-        .{ .element_content = .{ .content = .{ .text = .{ .start = 128, .end = 131 } } } },
-        .{ .element_start = .{ .name = .{ .start = 132, .end = 133 } } }, // p
-        .{ .attribute_start = .{ .name = .{ .start = 134, .end = 139 } } },
-        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 141, .end = 145 } }, .final = true } },
-        .{ .element_content = .{ .content = .{ .text = .{ .start = 147, .end = 154 } } } },
-        .{ .element_content = .{ .content = .{ .text = .{ .start = 163, .end = 169 } } } },
-        .{ .element_end = .{ .name = .{ .start = 174, .end = 175 } } }, // /p
-        .{ .element_content = .{ .content = .{ .text = .{ .start = 176, .end = 179 } } } },
-        .{ .element_start = .{ .name = .{ .start = 180, .end = 184 } } }, // line
-        .element_end_empty,
-        .{ .element_content = .{ .content = .{ .text = .{ .start = 187, .end = 190 } } } },
-        .{ .pi_start = .{ .target = .{ .start = 192, .end = 202 } } }, // another-pi
-        .{ .pi_content = .{ .content = .{ .start = 202, .end = 202 }, .final = true } },
-        .{ .element_content = .{ .content = .{ .text = .{ .start = 204, .end = 233 } } } },
-        .{ .element_start = .{ .name = .{ .start = 234, .end = 237 } } }, // div
-        .{ .element_start = .{ .name = .{ .start = 239, .end = 240 } } }, // p
-        .{ .element_content = .{ .content = .{ .entity = .{ .start = 242, .end = 245 } } } },
-        .{ .element_end = .{ .name = .{ .start = 248, .end = 249 } } }, // /p
-        .{ .element_end = .{ .name = .{ .start = 252, .end = 255 } } }, // /div
-        .{ .element_content = .{ .content = .{ .text = .{ .start = 256, .end = 257 } } } },
-        .{ .element_end = .{ .name = .{ .start = 259, .end = 263 } } }, // /root
-        .comment_start,
-        .{ .comment_content = .{ .content = .{ .start = 269, .end = 325 }, .final = true } },
-        .{ .pi_start = .{ .target = .{ .start = 332, .end = 339 } } }, // comment
-        .{ .pi_content = .{ .content = .{ .start = 340, .end = 351 }, .final = true } },
     });
 }
 
@@ -1616,7 +1616,7 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
     return token;
 }
 
-test "resetPos inside element content" {
+test resetPos {
     var scanner = Scanner{};
     var tokens = std.ArrayListUnmanaged(Token){};
     defer tokens.deinit(testing.allocator);

@@ -313,38 +313,7 @@ pub fn TokenReader(
     };
 }
 
-test "normalization" {
-    try testValid(.{}, "<root>Line 1\rLine 2\r\nLine 3\nLine 4\n\rLine 6\r\n\rLine 8</root>", &.{
-        .{ .element_start = .{ .name = "root" } },
-        .{ .element_content = .{ .content = .{ .text = "Line 1\nLine 2\nLine 3\nLine 4\n\nLine 6\n\nLine 8" } } },
-        .{ .element_end = .{ .name = "root" } },
-    });
-    try testValid(.{}, "<root attr=' Line 1\rLine 2\r\nLine 3\nLine 4\t\tMore    content\n\rLine 6\r\n\rLine 8 '/>", &.{
-        .{ .element_start = .{ .name = "root" } },
-        .{ .attribute_start = .{ .name = "attr" } },
-        .{ .attribute_content = .{
-            .content = .{ .text = " Line 1 Line 2 Line 3 Line 4  More    content  Line 6  Line 8 " },
-            .final = true,
-        } },
-        .element_end_empty,
-    });
-    try testValid(.{ .enable_normalization = false }, "<root>Line 1\rLine 2\r\nLine 3\nLine 4\n\rLine 6\r\n\rLine 8</root>", &.{
-        .{ .element_start = .{ .name = "root" } },
-        .{ .element_content = .{ .content = .{ .text = "Line 1\rLine 2\r\nLine 3\nLine 4\n\rLine 6\r\n\rLine 8" } } },
-        .{ .element_end = .{ .name = "root" } },
-    });
-    try testValid(.{ .enable_normalization = false }, "<root attr=' Line 1\rLine 2\r\nLine 3\nLine 4\t\tMore    content\n\rLine 6\r\n\rLine 8 '/>", &.{
-        .{ .element_start = .{ .name = "root" } },
-        .{ .attribute_start = .{ .name = "attr" } },
-        .{ .attribute_content = .{
-            .content = .{ .text = " Line 1\rLine 2\r\nLine 3\nLine 4\t\tMore    content\n\rLine 6\r\n\rLine 8 " },
-            .final = true,
-        } },
-        .element_end_empty,
-    });
-}
-
-test "complex document" {
+test TokenReader {
     try testValid(.{},
         \\<?xml version="1.0"?>
         \\<?some-pi?>
@@ -396,6 +365,37 @@ test "complex document" {
         .{ .comment_content = .{ .content = " Comments are allowed after the end of the root element ", .final = true } },
         .{ .pi_start = .{ .target = "comment" } },
         .{ .pi_content = .{ .content = "So are PIs ", .final = true } },
+    });
+}
+
+test "normalization" {
+    try testValid(.{}, "<root>Line 1\rLine 2\r\nLine 3\nLine 4\n\rLine 6\r\n\rLine 8</root>", &.{
+        .{ .element_start = .{ .name = "root" } },
+        .{ .element_content = .{ .content = .{ .text = "Line 1\nLine 2\nLine 3\nLine 4\n\nLine 6\n\nLine 8" } } },
+        .{ .element_end = .{ .name = "root" } },
+    });
+    try testValid(.{}, "<root attr=' Line 1\rLine 2\r\nLine 3\nLine 4\t\tMore    content\n\rLine 6\r\n\rLine 8 '/>", &.{
+        .{ .element_start = .{ .name = "root" } },
+        .{ .attribute_start = .{ .name = "attr" } },
+        .{ .attribute_content = .{
+            .content = .{ .text = " Line 1 Line 2 Line 3 Line 4  More    content  Line 6  Line 8 " },
+            .final = true,
+        } },
+        .element_end_empty,
+    });
+    try testValid(.{ .enable_normalization = false }, "<root>Line 1\rLine 2\r\nLine 3\nLine 4\n\rLine 6\r\n\rLine 8</root>", &.{
+        .{ .element_start = .{ .name = "root" } },
+        .{ .element_content = .{ .content = .{ .text = "Line 1\rLine 2\r\nLine 3\nLine 4\n\rLine 6\r\n\rLine 8" } } },
+        .{ .element_end = .{ .name = "root" } },
+    });
+    try testValid(.{ .enable_normalization = false }, "<root attr=' Line 1\rLine 2\r\nLine 3\nLine 4\t\tMore    content\n\rLine 6\r\n\rLine 8 '/>", &.{
+        .{ .element_start = .{ .name = "root" } },
+        .{ .attribute_start = .{ .name = "attr" } },
+        .{ .attribute_content = .{
+            .content = .{ .text = " Line 1\rLine 2\r\nLine 3\nLine 4\t\tMore    content\n\rLine 6\r\n\rLine 8 " },
+            .final = true,
+        } },
+        .element_end_empty,
     });
 }
 
