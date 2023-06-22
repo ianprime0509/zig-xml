@@ -1007,7 +1007,6 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         .element_end_after_name => if (syntax.isSpace(c)) {
             return .ok;
         } else if (c == '>') {
-            self.depth -= 1;
             if (self.depth == 0) {
                 self.seen_root_element = true;
             }
@@ -1196,6 +1195,29 @@ test "element content" {
         .{ .element_content = .{ .content = .{ .text = .{ .start = 9, .end = 22 } } } },
         .{ .element_end = .{ .name = .{ .start = 24, .end = 31 } } },
     });
+}
+
+test "element nesting" {
+    try testValid("<root><sub><inner/></sub></root>", &.{
+        .{ .element_start = .{ .name = .{ .start = 1, .end = 5 } } },
+        .{ .element_start = .{ .name = .{ .start = 7, .end = 10 } } },
+        .{ .element_start = .{ .name = .{ .start = 12, .end = 17 } } },
+        .element_end_empty,
+        .{ .element_end = .{ .name = .{ .start = 21, .end = 24 } } },
+        .{ .element_end = .{ .name = .{ .start = 27, .end = 31 } } },
+    });
+    try testValid("<root   ><sub\t><inner\n/></sub ></root\r  >", &.{
+        .{ .element_start = .{ .name = .{ .start = 1, .end = 5 } } },
+        .{ .element_start = .{ .name = .{ .start = 10, .end = 13 } } },
+        .{ .element_start = .{ .name = .{ .start = 16, .end = 21 } } },
+        .element_end_empty,
+        .{ .element_end = .{ .name = .{ .start = 26, .end = 29 } } },
+        .{ .element_end = .{ .name = .{ .start = 33, .end = 37 } } },
+    });
+    try testInvalid("<root></root></outer>", 14);
+    try testInvalid("<root ></root\n></outer\r>", 16);
+    try testIncomplete("<root><sub><inner/></sub>");
+    try testIncomplete("<root   ><sub\t><inner\n/></sub >");
 }
 
 test "XML declaration" {
