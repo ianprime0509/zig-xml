@@ -155,10 +155,24 @@ const NamespaceContext = struct {
         bindings.deinit(allocator);
     }
 
+    /// Binds the default namespace in the current scope.
+    ///
+    /// Only valid if there is a current scope.
+    pub inline fn bindDefault(self: *NamespaceContext, allocator: Allocator, uri: []const u8) !void {
+        try self.bindInner(allocator, "", uri);
+    }
+
     /// Binds a prefix in the current scope.
     ///
     /// Only valid if there is a current scope.
-    pub fn bind(self: *NamespaceContext, allocator: Allocator, prefix: []const u8, uri: []const u8) !void {
+    pub inline fn bindPrefix(self: *NamespaceContext, allocator: Allocator, prefix: []const u8, uri: []const u8) !void {
+        if (!syntax.isNcName(prefix)) {
+            return error.InvalidNsPrefix;
+        }
+        try self.bindInner(allocator, prefix, uri);
+    }
+
+    fn bindInner(self: *NamespaceContext, allocator: Allocator, prefix: []const u8, uri: []const u8) !void {
         // TODO: validate that uri is a valid URI reference
         if (prefix.len != 0 and uri.len == 0) {
             return error.CannotUndeclareNsPrefix;
@@ -168,7 +182,9 @@ const NamespaceContext = struct {
         errdefer allocator.free(key);
         const value = try allocator.dupe(u8, uri);
         errdefer allocator.free(value);
-        try bindings.put(allocator, key, value);
+        // We cannot clobber an existing prefix in this scope because that
+        // would imply a duplicate attribute name, which is validated earlier.
+        try bindings.putNoClobber(allocator, key, value);
     }
 
     /// Returns the URI, if any, bound to the given prefix.
@@ -214,7 +230,9 @@ const UnawareNamespaceContext = struct {
 
     pub inline fn endScope(_: *UnawareNamespaceContext, _: Allocator) void {}
 
-    pub inline fn bind(_: *UnawareNamespaceContext, _: Allocator, _: []const u8, _: []const u8) !void {}
+    pub inline fn bindDefault(_: *UnawareNamespaceContext, _: Allocator, _: []const u8) !void {}
+
+    pub inline fn bindPrefix(_: *UnawareNamespaceContext, _: Allocator, _: []const u8, _: []const u8) !void {}
 
     pub inline fn getUri(_: UnawareNamespaceContext, _: []const u8) ?[]const u8 {
         return null;
@@ -363,6 +381,7 @@ pub fn Reader(
         pub const Error = error{
             CannotUndeclareNsPrefix,
             DuplicateAttribute,
+            InvalidNsPrefix,
             InvalidQName,
             MismatchedEndTag,
             UndeclaredEntityReference,
@@ -513,9 +532,9 @@ pub fn Reader(
                 .element_start => |element_start| {
                     for (element_start.attributes.values()) |attr| {
                         if (mem.eql(u8, attr.name, "xmlns")) {
-                            try self.namespace_context.bind(self.allocator, "", attr.value);
+                            try self.namespace_context.bindDefault(self.allocator, attr.value);
                         } else if (mem.startsWith(u8, attr.name, "xmlns:")) {
-                            try self.namespace_context.bind(self.allocator, attr.name["xmlns:".len..], attr.value);
+                            try self.namespace_context.bindPrefix(self.allocator, attr.name["xmlns:".len..], attr.value);
                         }
                     }
                     const qname = try self.namespace_context.parseName(element_start.name, true);
@@ -723,6 +742,11 @@ test "namespace handling" {
     try testInvalid(.{}, "<: />", error.InvalidQName);
     try testInvalid(.{}, "<a: />", error.InvalidQName);
     try testInvalid(.{}, "<:a />", error.InvalidQName);
+    try testInvalid(.{}, "<root xmlns:='urn:1' />", error.InvalidNsPrefix);
+    try testInvalid(.{}, "<root xmlns::='urn:1' />", error.InvalidNsPrefix);
+    try testInvalid(.{}, "<root xmlns:a:b='urn:1' />", error.InvalidNsPrefix);
+    try testInvalid(.{}, "<root xmlns='urn:1' xmlns='urn:2' />", error.DuplicateAttribute);
+    try testInvalid(.{}, "<root xmlns:abc='urn:1' xmlns:abc='urn:2' />", error.DuplicateAttribute);
 
     try testValid(.{ .namespace_aware = false },
         \\<a:root xmlns:a="urn:1">
@@ -773,6 +797,26 @@ test "namespace handling" {
         .{ .element_start = .{ .name = .{ .local = ":a" } } },
         .{ .element_end = .{ .name = .{ .local = ":a" } } },
     });
+    try testValid(.{ .namespace_aware = false }, "<root xmlns:='urn:1' />", &.{
+        .{ .element_start = .{ .name = .{ .local = "root" }, .attributes = &.{
+            .{ .name = .{ .local = "xmlns:" }, .value = "urn:1" },
+        } } },
+        .{ .element_end = .{ .name = .{ .local = "root" } } },
+    });
+    try testValid(.{ .namespace_aware = false }, "<root xmlns::='urn:1' />", &.{
+        .{ .element_start = .{ .name = .{ .local = "root" }, .attributes = &.{
+            .{ .name = .{ .local = "xmlns::" }, .value = "urn:1" },
+        } } },
+        .{ .element_end = .{ .name = .{ .local = "root" } } },
+    });
+    try testValid(.{ .namespace_aware = false }, "<root xmlns:a:b='urn:1' />", &.{
+        .{ .element_start = .{ .name = .{ .local = "root" }, .attributes = &.{
+            .{ .name = .{ .local = "xmlns:a:b" }, .value = "urn:1" },
+        } } },
+        .{ .element_end = .{ .name = .{ .local = "root" } } },
+    });
+    try testInvalid(.{ .namespace_aware = false }, "<root xmlns='urn:1' xmlns='urn:2' />", error.DuplicateAttribute);
+    try testInvalid(.{ .namespace_aware = false }, "<root xmlns:abc='urn:1' xmlns:abc='urn:2' />", error.DuplicateAttribute);
 }
 
 fn testValid(comptime options: ReaderOptions, input: []const u8, expected_events: []const Event) !void {
