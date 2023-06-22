@@ -9,14 +9,8 @@ changes are highly likely. If you need a stable and well-tested XML library,
 [zig-libxml2](https://github.com/mitchellh/zig-libxml2) is probably your best
 bet (build setup for the popular libxml2 C library).
 
-## Reading XML
-
-**TODO:** see the doc comments in the code; I keep redesigning the API too often
-and don't want to keep the README updated yet.
-
-## Writing XML
-
-**TODO:** https://github.com/ianprime0509/zig-xml/issues/10
+See the documentation in the code for more information about the available APIs
+(start in `xml.zig`).
 
 ## Examples
 

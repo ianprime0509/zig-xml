@@ -1,3 +1,25 @@
+//! An XML library, currently supporting reading XML.
+//!
+//! Most applications will want to start with `Reader` and investigate the
+//! other parser options if they want to avoid dynamic memory allocation or
+//! want better performance at the expense of ease of use.
+//!
+//! There are three parsers available, with increasing levels of abstraction,
+//! ease of use, and standard conformance. The documentation for each parser
+//! provides more detailed information on its functionality.
+//!
+//! 1. `Scanner` - the lowest-level parser. A state machine that accepts
+//!    Unicode codepoints one by one and returns "tokens" referencing ranges of
+//!    input data.
+//! 2. `TokenReader` - a mid-level parser that improves on `Scanner` by
+//!    buffering input so that returned tokens can use UTF-8-encoded byte
+//!    slices rather than ranges. It also uses a `std.io.Reader` and a decoder
+//!    (see `encoding`) rather than forcing the user to pass codepoints
+//!    directly.
+//! 3. `Reader` - a general-purpose streaming parser which can handle
+//!    namespaces. Helper functions are available to parse some or all of a
+//!    document into a `Node`, which acts as a minimal DOM abstraction.
+
 const std = @import("std");
 const testing = std.testing;
 
