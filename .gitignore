@@ -1,3 +1,5 @@
+bench/*.xml
+callgrind.out.*
 core.*
 docs
 fuzz/outputs

@@ -1,0 +1,6 @@
+[submodule "bench/lib/zig-libxml2"]
+	path = bench/lib/zig-libxml2
+	url = https://github.com/mitchellh/zig-libxml2.git
+[submodule "bench/lib/yxml"]
+	path = bench/lib/yxml
+	url = https://g.blicky.net/yxml.git
