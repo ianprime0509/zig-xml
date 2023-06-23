@@ -4,3 +4,6 @@
 [submodule "bench/lib/yxml"]
 	path = bench/lib/yxml
 	url = https://g.blicky.net/yxml.git
+[submodule "bench/lib/mxml"]
+	path = bench/lib/mxml
+	url = https://github.com/michaelrsweet/mxml.git
