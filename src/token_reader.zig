@@ -257,7 +257,7 @@ pub fn TokenReader(
                 else => |other| return other,
             };
             while (true) {
-                if (self.scanner.pos == self.buffer.len) {
+                if (self.scanner.pos + self.cp_len == self.buffer.len) {
                     return error.Overflow;
                 }
                 self.buffer[self.scanner.pos + self.cp_len] = b;
