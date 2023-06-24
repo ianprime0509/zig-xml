@@ -376,6 +376,7 @@ pub fn Reader(
         const Self = @This();
         const TokenReaderType = TokenReader(ReaderType, DecoderType, .{
             .buffer_size = options.buffer_size,
+            .enable_normalization = options.enable_normalization,
         });
 
         pub const Error = error{
