@@ -360,7 +360,7 @@ fn TokenMatcher(comptime token: []const u8) type {
 /// the number of bytes making up the codepoint so that all ranges are byte
 /// ranges, but it is also valid to use other interpretations (e.g. the user
 /// could always pass 1 if the input is already parsed into codepoints).
-pub inline fn next(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
+pub fn next(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
     const token = self.nextNoAdvance(c, len) catch |e| {
         self.state = .@"error";
         return e;
@@ -374,14 +374,6 @@ pub inline fn next(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token 
 /// function is needed because Zig has no "successdefer" to advance `pos` only
 /// in case of success).
 fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
-    // Note: none of the switch cases below capture by pointer, because it is
-    // too easy to accidentally clobber some state that needs to be returned in
-    // a token.
-    // Similarly, there is no blanket 'return error.SyntaxError' at the end of
-    // this function to avoid duplication across cases because it is too easy
-    // to miss a 'return .ok'.
-    // These decisions may be revisited later if they somehow manage to impact
-    // performance.
     switch (self.state) {
         .start => if (c == 0xFEFF or syntax.isSpace(c)) {
             self.state = .start_after_bom;
@@ -416,12 +408,13 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .pi_or_xml_decl_start => |state| if (syntax.isNameStartChar(c) or (syntax.isNameChar(c) and self.pos > state.start)) {
+        .pi_or_xml_decl_start => |*state| if (syntax.isNameStartChar(c) or (syntax.isNameChar(c) and self.pos > state.start)) {
             const xml_seen = state.xml_seen.accept(c);
             if (xml_seen.mightMatch()) {
-                self.state = .{ .pi_or_xml_decl_start = .{ .start = state.start, .xml_seen = xml_seen } };
+                state.xml_seen = xml_seen;
             } else {
-                self.state = .{ .pi_target = .{ .start = state.start, .xml_seen = xml_seen } };
+                const start = state.start;
+                self.state = .{ .pi_target = .{ .start = start, .xml_seen = xml_seen } };
             }
             return .ok;
         } else if (syntax.isSpace(c) and self.pos > state.start) {
@@ -429,16 +422,18 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
                 self.state = .xml_decl;
                 return .ok;
             } else {
+                const target = Range{ .start = state.start, .end = self.pos };
                 self.state = .pi_after_target;
-                return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
+                return .{ .pi_start = .{ .target = target } };
             }
         } else if (c == '?' and self.pos > state.start) {
             if (state.xml_seen.matches()) {
                 // Can't have an XML declaration without a version
                 return error.SyntaxError;
             } else {
+                const target = Range{ .start = state.start, .end = self.pos };
                 self.state = .{ .pi_maybe_end = .{ .start = self.pos, .end = self.pos } };
-                return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
+                return .{ .pi_start = .{ .target = target } };
             }
         } else {
             return error.SyntaxError;
@@ -453,11 +448,11 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .xml_decl_version_name => |state| if (c == state.left[0]) {
+        .xml_decl_version_name => |*state| if (c == state.left[0]) {
             if (state.left.len == 1) {
                 self.state = .xml_decl_after_version_name;
             } else {
-                self.state = .{ .xml_decl_version_name = .{ .left = state.left[1..] } };
+                state.left = state.left[1..];
             }
             return .ok;
         } else {
@@ -482,19 +477,22 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .xml_decl_version_value_start => |state| if (c == state.left[0]) {
+        .xml_decl_version_value_start => |*state| if (c == state.left[0]) {
             if (state.left.len == 1) {
-                self.state = .{ .xml_decl_version_value = .{ .start = state.start, .quote = state.quote } };
+                const start = state.start;
+                const quote = state.quote;
+                self.state = .{ .xml_decl_version_value = .{ .start = start, .quote = quote } };
             } else {
-                self.state = .{ .xml_decl_version_value_start = .{ .start = state.start, .quote = state.quote, .left = state.left[1..] } };
+                state.left = state.left[1..];
             }
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_version_value => |state| if (c == state.quote and self.pos > state.start + "1.".len) {
-            self.state = .{ .xml_decl_after_version = .{ .version = .{ .start = state.start, .end = self.pos } } };
+        .xml_decl_version_value => |*state| if (c == state.quote and self.pos > state.start + "1.".len) {
+            const start = state.start;
+            self.state = .{ .xml_decl_after_version = .{ .version = .{ .start = start, .end = self.pos } } };
             return .ok;
         } else if (syntax.isDigit(c)) {
             return .ok;
@@ -502,59 +500,70 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_version => |state| if (syntax.isSpace(c)) {
+        .xml_decl_after_version => |*state| if (syntax.isSpace(c)) {
             return .ok;
         } else if (c == 'e') {
-            self.state = .{ .xml_decl_encoding_name = .{ .version = state.version, .left = "ncoding" } };
+            const version = state.version;
+            self.state = .{ .xml_decl_encoding_name = .{ .version = version, .left = "ncoding" } };
             return .ok;
         } else if (c == 's') {
-            self.state = .{ .xml_decl_standalone_name = .{ .version = state.version, .encoding = null, .left = "tandalone" } };
+            const version = state.version;
+            self.state = .{ .xml_decl_standalone_name = .{ .version = version, .encoding = null, .left = "tandalone" } };
             return .ok;
         } else if (c == '?') {
+            const version = state.version;
             self.state = .xml_decl_end;
-            return .{ .xml_declaration = .{ .version = state.version, .encoding = null, .standalone = null } };
+            return .{ .xml_declaration = .{ .version = version, .encoding = null, .standalone = null } };
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_encoding_name => |state| if (c == state.left[0]) {
+        .xml_decl_encoding_name => |*state| if (c == state.left[0]) {
             if (state.left.len == 1) {
-                self.state = .{ .xml_decl_after_encoding_name = .{ .version = state.version } };
+                const version = state.version;
+                self.state = .{ .xml_decl_after_encoding_name = .{ .version = version } };
             } else {
-                self.state = .{ .xml_decl_encoding_name = .{ .version = state.version, .left = state.left[1..] } };
+                state.left = state.left[1..];
             }
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_encoding_name => |state| if (syntax.isSpace(c)) {
+        .xml_decl_after_encoding_name => |*state| if (syntax.isSpace(c)) {
             return .ok;
         } else if (c == '=') {
-            self.state = .{ .xml_decl_after_encoding_equals = .{ .version = state.version } };
+            const version = state.version;
+            self.state = .{ .xml_decl_after_encoding_equals = .{ .version = version } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_encoding_equals => |state| if (syntax.isSpace(c)) {
+        .xml_decl_after_encoding_equals => |*state| if (syntax.isSpace(c)) {
             return .ok;
         } else if (c == '"' or c == '\'') {
-            self.state = .{ .xml_decl_encoding_value_start = .{ .version = state.version, .start = self.pos + len, .quote = @intCast(u8, c) } };
+            const version = state.version;
+            self.state = .{ .xml_decl_encoding_value_start = .{ .version = version, .start = self.pos + len, .quote = @intCast(u8, c) } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_encoding_value_start => |state| if (syntax.isEncodingStartChar(c)) {
-            self.state = .{ .xml_decl_encoding_value = .{ .version = state.version, .start = state.start, .quote = state.quote } };
+        .xml_decl_encoding_value_start => |*state| if (syntax.isEncodingStartChar(c)) {
+            const version = state.version;
+            const start = state.start;
+            const quote = state.quote;
+            self.state = .{ .xml_decl_encoding_value = .{ .version = version, .start = start, .quote = quote } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_encoding_value => |state| if (c == state.quote) {
-            self.state = .{ .xml_decl_after_encoding = .{ .version = state.version, .encoding = .{ .start = state.start, .end = self.pos } } };
+        .xml_decl_encoding_value => |*state| if (c == state.quote) {
+            const version = state.version;
+            const encoding = Range{ .start = state.start, .end = self.pos };
+            self.state = .{ .xml_decl_after_encoding = .{ .version = version, .encoding = encoding } };
             return .ok;
         } else if (syntax.isEncodingChar(c)) {
             return .ok;
@@ -562,69 +571,86 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_encoding => |state| if (syntax.isSpace(c)) {
+        .xml_decl_after_encoding => |*state| if (syntax.isSpace(c)) {
             return .ok;
         } else if (c == 's') {
-            self.state = .{ .xml_decl_standalone_name = .{ .version = state.version, .encoding = state.encoding, .left = "tandalone" } };
+            const version = state.version;
+            const encoding = state.encoding;
+            self.state = .{ .xml_decl_standalone_name = .{ .version = version, .encoding = encoding, .left = "tandalone" } };
             return .ok;
         } else if (c == '?') {
+            const version = state.version;
+            const encoding = state.encoding;
             self.state = .xml_decl_end;
-            return .{ .xml_declaration = .{ .version = state.version, .encoding = state.encoding, .standalone = null } };
+            return .{ .xml_declaration = .{ .version = version, .encoding = encoding, .standalone = null } };
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_standalone_name => |state| if (c == state.left[0]) {
+        .xml_decl_standalone_name => |*state| if (c == state.left[0]) {
             if (state.left.len == 1) {
-                self.state = .{ .xml_decl_after_standalone_name = .{ .version = state.version, .encoding = state.encoding } };
+                const version = state.version;
+                const encoding = state.encoding;
+                self.state = .{ .xml_decl_after_standalone_name = .{ .version = version, .encoding = encoding } };
             } else {
-                self.state = .{ .xml_decl_standalone_name = .{ .version = state.version, .encoding = state.encoding, .left = state.left[1..] } };
+                state.left = state.left[1..];
             }
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_standalone_name => |state| if (syntax.isSpace(c)) {
+        .xml_decl_after_standalone_name => |*state| if (syntax.isSpace(c)) {
             return .ok;
         } else if (c == '=') {
-            self.state = .{ .xml_decl_after_standalone_equals = .{ .version = state.version, .encoding = state.encoding } };
+            const version = state.version;
+            const encoding = state.encoding;
+            self.state = .{ .xml_decl_after_standalone_equals = .{ .version = version, .encoding = encoding } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_after_standalone_equals => |state| if (syntax.isSpace(c)) {
+        .xml_decl_after_standalone_equals => |*state| if (syntax.isSpace(c)) {
             return .ok;
         } else if (c == '"' or c == '\'') {
-            self.state = .{ .xml_decl_standalone_value_start = .{ .version = state.version, .encoding = state.encoding, .quote = @intCast(u8, c) } };
+            const version = state.version;
+            const encoding = state.encoding;
+            self.state = .{ .xml_decl_standalone_value_start = .{ .version = version, .encoding = encoding, .quote = @intCast(u8, c) } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_standalone_value_start => |state| if (c == 'y') {
-            self.state = .{ .xml_decl_standalone_value = .{ .quote = state.quote, .left = "es" } };
-            return .{ .xml_declaration = .{ .version = state.version, .encoding = state.encoding, .standalone = true } };
+        .xml_decl_standalone_value_start => |*state| if (c == 'y') {
+            const version = state.version;
+            const encoding = state.encoding;
+            const quote = state.quote;
+            self.state = .{ .xml_decl_standalone_value = .{ .quote = quote, .left = "es" } };
+            return .{ .xml_declaration = .{ .version = version, .encoding = encoding, .standalone = true } };
         } else if (c == 'n') {
-            self.state = .{ .xml_decl_standalone_value = .{ .quote = state.quote, .left = "o" } };
-            return .{ .xml_declaration = .{ .version = state.version, .encoding = state.encoding, .standalone = false } };
+            const version = state.version;
+            const encoding = state.encoding;
+            const quote = state.quote;
+            self.state = .{ .xml_decl_standalone_value = .{ .quote = quote, .left = "o" } };
+            return .{ .xml_declaration = .{ .version = version, .encoding = encoding, .standalone = false } };
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_standalone_value => |state| if (c == state.left[0]) {
+        .xml_decl_standalone_value => |*state| if (c == state.left[0]) {
             if (state.left.len == 1) {
-                self.state = .{ .xml_decl_standalone_value_end = .{ .quote = state.quote } };
+                const quote = state.quote;
+                self.state = .{ .xml_decl_standalone_value_end = .{ .quote = quote } };
             } else {
-                self.state = .{ .xml_decl_standalone_value = .{ .quote = state.quote, .left = state.left[1..] } };
+                state.left = state.left[1..];
             }
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .xml_decl_standalone_value_end => |state| if (c == state.quote) {
+        .xml_decl_standalone_value_end => |*state| if (c == state.quote) {
             self.state = .xml_decl_after_standalone;
             return .ok;
         } else {
@@ -699,8 +725,9 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .comment => |state| if (c == '-') {
-            self.state = .{ .comment_maybe_before_end = .{ .start = state.start, .end = self.pos } };
+        .comment => |*state| if (c == '-') {
+            const start = state.start;
+            self.state = .{ .comment_maybe_before_end = .{ .start = start, .end = self.pos } };
             return .ok;
         } else if (syntax.isChar(c)) {
             return .ok;
@@ -708,11 +735,13 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .comment_maybe_before_end => |state| if (c == '-') {
+        .comment_maybe_before_end => |*state| if (c == '-') {
+            const content = Range{ .start = state.start, .end = state.end };
             self.state = .comment_before_end;
-            return .{ .comment_content = .{ .content = .{ .start = state.start, .end = state.end }, .final = true } };
+            return .{ .comment_content = .{ .content = content, .final = true } };
         } else if (syntax.isChar(c)) {
-            self.state = .{ .comment = .{ .start = state.start } };
+            const start = state.start;
+            self.state = .{ .comment = .{ .start = start } };
             return .ok;
         } else {
             return error.SyntaxError;
@@ -736,23 +765,27 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .pi_target => |state| if (syntax.isNameChar(c)) {
-            self.state = .{ .pi_target = .{ .start = state.start, .xml_seen = state.xml_seen.accept(c) } };
+        .pi_target => |*state| if (syntax.isNameChar(c)) {
+            const start = state.start;
+            const xml_seen = state.xml_seen.accept(c);
+            self.state = .{ .pi_target = .{ .start = start, .xml_seen = xml_seen } };
             return .ok;
         } else if (syntax.isSpace(c)) {
             if (state.xml_seen.matches()) {
                 // PI named 'xml' is not allowed
                 return error.SyntaxError;
             } else {
+                const target = Range{ .start = state.start, .end = self.pos };
                 self.state = .pi_after_target;
-                return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
+                return .{ .pi_start = .{ .target = target } };
             }
         } else if (c == '?') {
             if (state.xml_seen.matches()) {
                 return error.SyntaxError;
             } else {
+                const target = Range{ .start = state.start, .end = self.pos };
                 self.state = .{ .pi_maybe_end = .{ .start = self.pos, .end = self.pos } };
-                return .{ .pi_start = .{ .target = .{ .start = state.start, .end = self.pos } } };
+                return .{ .pi_start = .{ .target = target } };
             }
         } else {
             return error.SyntaxError;
@@ -770,8 +803,9 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .pi_content => |state| if (c == '?') {
-            self.state = .{ .pi_maybe_end = .{ .start = state.start, .end = self.pos } };
+        .pi_content => |*state| if (c == '?') {
+            const start = state.start;
+            self.state = .{ .pi_maybe_end = .{ .start = start, .end = self.pos } };
             return .ok;
         } else if (syntax.isChar(c)) {
             return .ok;
@@ -779,33 +813,36 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .pi_maybe_end => |state| if (c == '>') {
+        .pi_maybe_end => |*state| if (c == '>') {
+            const content = Range{ .start = state.start, .end = state.end };
             if (self.depth == 0) {
                 self.state = .document_content;
             } else {
                 self.state = .{ .content = .{ .start = self.pos + len } };
             }
-            return .{ .pi_content = .{ .content = .{ .start = state.start, .end = state.end }, .final = true } };
+            return .{ .pi_content = .{ .content = content, .final = true } };
         } else if (syntax.isChar(c)) {
-            self.state = .{ .pi_content = .{ .start = state.start } };
+            const start = state.start;
+            self.state = .{ .pi_content = .{ .start = start } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .cdata_before_start => |state| if (c == state.left[0]) {
+        .cdata_before_start => |*state| if (c == state.left[0]) {
             if (state.left.len == 1) {
                 self.state = .{ .cdata = .{ .start = self.pos + len } };
             } else {
-                self.state = .{ .cdata_before_start = .{ .left = state.left[1..] } };
+                state.left = state.left[1..];
             }
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .cdata => |state| if (c == ']') {
-            self.state = .{ .cdata_maybe_end = .{ .start = state.start, .end = self.pos, .left = "]>" } };
+        .cdata => |*state| if (c == ']') {
+            const start = state.start;
+            self.state = .{ .cdata_maybe_end = .{ .start = start, .end = self.pos, .left = "]>" } };
             return .ok;
         } else if (syntax.isChar(c)) {
             return .ok;
@@ -813,22 +850,24 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .cdata_maybe_end => |state| if (c == state.left[0]) {
+        .cdata_maybe_end => |*state| if (c == state.left[0]) {
             if (state.left.len == 1) {
+                const text = Range{ .start = state.start, .end = state.end };
                 self.state = .{ .content = .{ .start = self.pos + len } };
-                return .{ .element_content = .{ .content = .{ .text = .{ .start = state.start, .end = state.end } } } };
+                return .{ .element_content = .{ .content = .{ .text = text } } };
             } else {
-                self.state = .{ .cdata_maybe_end = .{ .start = state.start, .end = state.end, .left = state.left[1..] } };
+                state.left = state.left[1..];
                 return .ok;
             }
         } else if (syntax.isChar(c)) {
-            self.state = .{ .cdata = .{ .start = state.start } };
+            const start = state.start;
+            self.state = .{ .cdata = .{ .start = start } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .element_start_name => |state| if (syntax.isNameChar(c)) {
+        .element_start_name => |*state| if (syntax.isNameChar(c)) {
             return .ok;
         } else if (syntax.isSpace(c)) {
             self.depth += 1;
@@ -842,8 +881,9 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return .{ .element_start = .{ .name = name } };
         } else if (c == '>') {
             self.depth += 1;
+            const name = Range{ .start = state.start, .end = self.pos };
             self.state = .{ .content = .{ .start = self.pos + len } };
-            return .{ .element_start = .{ .name = .{ .start = state.start, .end = self.pos } } };
+            return .{ .element_start = .{ .name = name } };
         } else {
             return error.SyntaxError;
         },
@@ -878,14 +918,16 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .attribute_name => |state| if (syntax.isNameChar(c)) {
+        .attribute_name => |*state| if (syntax.isNameChar(c)) {
             return .ok;
         } else if (syntax.isSpace(c)) {
+            const name = Range{ .start = state.start, .end = self.pos };
             self.state = .attribute_after_name;
-            return .{ .attribute_start = .{ .name = .{ .start = state.start, .end = self.pos } } };
+            return .{ .attribute_start = .{ .name = name } };
         } else if (c == '=') {
+            const name = Range{ .start = state.start, .end = self.pos };
             self.state = .attribute_after_equals;
-            return .{ .attribute_start = .{ .name = .{ .start = state.start, .end = self.pos } } };
+            return .{ .attribute_start = .{ .name = name } };
         } else {
             return error.SyntaxError;
         },
@@ -908,17 +950,19 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .attribute_content => |state| if (c == state.quote) {
+        .attribute_content => |*state| if (c == state.quote) {
+            const text = Range{ .start = state.start, .end = self.pos };
             self.state = .element_start_after_name;
-            return .{ .attribute_content = .{ .content = .{ .text = .{ .start = state.start, .end = self.pos } }, .final = true } };
+            return .{ .attribute_content = .{ .content = .{ .text = text }, .final = true } };
         } else if (c == '&') {
-            const range = Range{ .start = state.start, .end = self.pos };
-            self.state = .{ .attribute_content_ref_start = .{ .quote = state.quote } };
-            if (range.isEmpty()) {
+            const text = Range{ .start = state.start, .end = self.pos };
+            const quote = state.quote;
+            self.state = .{ .attribute_content_ref_start = .{ .quote = quote } };
+            if (text.isEmpty()) {
                 // We do not want to emit an empty text content token between entities
                 return .ok;
             } else {
-                return .{ .attribute_content = .{ .content = .{ .text = range } } };
+                return .{ .attribute_content = .{ .content = .{ .text = text } } };
             }
         } else if (syntax.isChar(c)) {
             return .ok;
@@ -926,52 +970,60 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .attribute_content_ref_start => |state| if (syntax.isNameStartChar(c)) {
-            self.state = .{ .attribute_content_entity_ref_name = .{ .start = self.pos, .quote = state.quote } };
+        .attribute_content_ref_start => |*state| if (syntax.isNameStartChar(c)) {
+            const quote = state.quote;
+            self.state = .{ .attribute_content_entity_ref_name = .{ .start = self.pos, .quote = quote } };
             return .ok;
         } else if (c == '#') {
-            self.state = .{ .attribute_content_char_ref_start = .{ .quote = state.quote } };
+            const quote = state.quote;
+            self.state = .{ .attribute_content_char_ref_start = .{ .quote = quote } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .attribute_content_entity_ref_name => |state| if (syntax.isNameChar(c)) {
+        .attribute_content_entity_ref_name => |*state| if (syntax.isNameChar(c)) {
             return .ok;
         } else if (c == ';') {
-            self.state = .{ .attribute_content = .{ .start = self.pos + len, .quote = state.quote } };
-            return .{ .attribute_content = .{ .content = .{ .entity = .{ .start = state.start, .end = self.pos } } } };
+            const entity = Range{ .start = state.start, .end = self.pos };
+            const quote = state.quote;
+            self.state = .{ .attribute_content = .{ .start = self.pos + len, .quote = quote } };
+            return .{ .attribute_content = .{ .content = .{ .entity = entity } } };
         } else {
             return error.SyntaxError;
         },
 
-        .attribute_content_char_ref_start => |state| if (syntax.isDigit(c)) {
-            self.state = .{ .attribute_content_char_ref = .{ .hex = false, .value = syntax.digitValue(c), .quote = state.quote } };
+        .attribute_content_char_ref_start => |*state| if (syntax.isDigit(c)) {
+            const quote = state.quote;
+            self.state = .{ .attribute_content_char_ref = .{ .hex = false, .value = syntax.digitValue(c), .quote = quote } };
             return .ok;
         } else if (c == 'x') {
-            self.state = .{ .attribute_content_char_ref = .{ .hex = true, .value = 0, .quote = state.quote } };
+            const quote = state.quote;
+            self.state = .{ .attribute_content_char_ref = .{ .hex = true, .value = 0, .quote = quote } };
             return .ok;
         } else {
             return error.SyntaxError;
         },
 
-        .attribute_content_char_ref => |state| if (!state.hex and syntax.isDigit(c)) {
+        .attribute_content_char_ref => |*state| if (!state.hex and syntax.isDigit(c)) {
             const value = 10 * @as(u32, state.value) + syntax.digitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
             }
-            self.state = .{ .attribute_content_char_ref = .{ .hex = false, .value = @intCast(u21, value), .quote = state.quote } };
+            state.value = @intCast(u21, value);
             return .ok;
         } else if (state.hex and syntax.isHexDigit(c)) {
             const value = 16 * @as(u32, state.value) + syntax.hexDigitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
             }
-            self.state = .{ .attribute_content_char_ref = .{ .hex = true, .value = @intCast(u21, value), .quote = state.quote } };
+            state.value = @intCast(u21, value);
             return .ok;
         } else if (c == ';' and syntax.isChar(state.value)) {
-            self.state = .{ .attribute_content = .{ .start = self.pos + len, .quote = state.quote } };
-            return .{ .attribute_content = .{ .content = .{ .codepoint = state.value } } };
+            const codepoint = state.value;
+            const quote = state.quote;
+            self.state = .{ .attribute_content = .{ .start = self.pos + len, .quote = quote } };
+            return .{ .attribute_content = .{ .content = .{ .codepoint = codepoint } } };
         } else {
             return error.SyntaxError;
         },
@@ -983,23 +1035,25 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .element_end_name => |state| if (syntax.isNameChar(c)) {
+        .element_end_name => |*state| if (syntax.isNameChar(c)) {
             return .ok;
         } else if (syntax.isSpace(c)) {
             self.depth -= 1;
+            const name = Range{ .start = state.start, .end = self.pos };
             self.state = .element_end_after_name;
-            return .{ .element_end = .{ .name = .{ .start = state.start, .end = self.pos } } };
+            return .{ .element_end = .{ .name = name } };
         } else if (c == '>') {
             self.depth -= 1;
             if (self.depth == 0) {
                 self.seen_root_element = true;
             }
+            const name = Range{ .start = state.start, .end = self.pos };
             if (self.depth == 0) {
                 self.state = .document_content;
             } else {
                 self.state = .{ .content = .{ .start = self.pos + len } };
             }
-            return .{ .element_end = .{ .name = .{ .start = state.start, .end = self.pos } } };
+            return .{ .element_end = .{ .name = name } };
         } else {
             return error.SyntaxError;
         },
@@ -1020,27 +1074,26 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .content => |state| if (c == '<') {
+        .content => |*state| if (c == '<') {
+            const text = Range{ .start = state.start, .end = self.pos };
             self.state = .unknown_start;
-            const range = Range{ .start = state.start, .end = self.pos };
-            if (range.isEmpty()) {
+            if (text.isEmpty()) {
                 // Do not report empty text content between elements, e.g.
                 // <e1></e1><e2></e2> (there is no text content between or
                 // within e1 and e2).
                 return .ok;
             } else {
-                return .{ .element_content = .{ .content = .{ .text = range } } };
+                return .{ .element_content = .{ .content = .{ .text = text } } };
             }
         } else if (c == '&') {
-            const range = Range{ .start = state.start, .end = self.pos };
+            const text = Range{ .start = state.start, .end = self.pos };
             self.state = .content_ref_start;
-            if (range.isEmpty()) {
+            if (text.isEmpty()) {
                 return .ok;
             } else {
-                return .{ .element_content = .{ .content = .{ .text = range } } };
+                return .{ .element_content = .{ .content = .{ .text = text } } };
             }
         } else if (syntax.isChar(c)) {
-            // Textual content is not allowed outside the root element.
             return .ok;
         } else {
             return error.SyntaxError;
@@ -1056,11 +1109,12 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .content_entity_ref_name => |state| if (syntax.isNameChar(c)) {
+        .content_entity_ref_name => |*state| if (syntax.isNameChar(c)) {
             return .ok;
         } else if (c == ';') {
+            const entity = Range{ .start = state.start, .end = self.pos };
             self.state = .{ .content = .{ .start = self.pos + len } };
-            return .{ .element_content = .{ .content = .{ .entity = .{ .start = state.start, .end = self.pos } } } };
+            return .{ .element_content = .{ .content = .{ .entity = entity } } };
         } else {
             return error.SyntaxError;
         },
@@ -1075,23 +1129,24 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             return error.SyntaxError;
         },
 
-        .content_char_ref => |state| if (!state.hex and syntax.isDigit(c)) {
+        .content_char_ref => |*state| if (!state.hex and syntax.isDigit(c)) {
             const value = 10 * @as(u32, state.value) + syntax.digitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
             }
-            self.state = .{ .content_char_ref = .{ .hex = false, .value = @intCast(u21, value) } };
+            state.value = @intCast(u21, value);
             return .ok;
         } else if (state.hex and syntax.isHexDigit(c)) {
             const value = 16 * @as(u32, state.value) + syntax.hexDigitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
             }
-            self.state = .{ .content_char_ref = .{ .hex = true, .value = @intCast(u21, value) } };
+            state.value = @intCast(u21, value);
             return .ok;
         } else if (c == ';' and syntax.isChar(state.value)) {
+            const codepoint = state.value;
             self.state = .{ .content = .{ .start = self.pos + len } };
-            return .{ .element_content = .{ .content = .{ .codepoint = state.value } } };
+            return .{ .element_content = .{ .content = .{ .codepoint = codepoint } } };
         } else {
             return error.SyntaxError;
         },
