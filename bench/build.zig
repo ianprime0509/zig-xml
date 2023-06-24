@@ -8,12 +8,15 @@ pub fn build(b: *Build) !void {
 
     const bench_scanner = addBench(b, "scanner");
     bench_scanner.addModule("xml", xml);
+    bench_scanner.linkLibC();
 
     const bench_token_reader = addBench(b, "token_reader");
     bench_token_reader.addModule("xml", xml);
+    bench_token_reader.linkLibC();
 
     const bench_reader = addBench(b, "reader");
     bench_reader.addModule("xml", xml);
+    bench_reader.linkLibC();
 
     const libxml2_lib = try libxml2.create(b, .{}, .ReleaseFast, .{
         .iconv = false,

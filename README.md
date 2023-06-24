@@ -37,7 +37,7 @@ error trace for further debugging.
 ## Benchmarking
 
 There is a benchmarking setup in the `bench` directory. Currently, the results
-are pretty abysmal: the `reader` benchmark is almost 650% slower than the
+are reasonably bad: the `reader` benchmark is almost 225% slower than the
 `libxml2` benchmark, despite supposedly doing fairly equivalent work.
 
 ## License
