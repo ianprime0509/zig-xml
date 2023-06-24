@@ -242,6 +242,91 @@ pub const Utf8Decoder = struct {
     }
 };
 
+test Utf8Decoder {
+    const input =
+        // 1-byte encodings
+        "\x00\x01 ABC abc 123" ++
+        // 2-byte encodings
+        "éèçñåβΘ" ++
+        // 3-byte encodings
+        "日本語ＡＥＳＴＨＥＴＩＣ" ++
+        // 4-byte encodings
+        "😳😂❤️👩‍👩‍👧‍👧" ++
+        // Overlong encodings
+        "\xC0\x80\xE0\x80\x80\xF0\x80\x80\x80" ++
+        // Out of bounds codepoint
+        "\xF7\xBF\xBF\xBF" ++
+        // Surrogate halves
+        "\xED\xA0\x80\xED\xBF\xBF";
+    const expected: []const (error{InvalidUtf8}!u21) = &.{
+        '\x00',
+        '\x01',
+        ' ',
+        'A',
+        'B',
+        'C',
+        ' ',
+        'a',
+        'b',
+        'c',
+        ' ',
+        '1',
+        '2',
+        '3',
+        'é',
+        'è',
+        'ç',
+        'ñ',
+        'å',
+        'β',
+        'Θ',
+        '日',
+        '本',
+        '語',
+        'Ａ',
+        'Ｅ',
+        'Ｓ',
+        'Ｔ',
+        'Ｈ',
+        'Ｅ',
+        'Ｔ',
+        'Ｉ',
+        'Ｃ',
+        '😳',
+        '😂',
+        '❤',
+        '\u{FE0F}', // variation selector-16
+        '👩',
+        '\u{200D}', // zero-width joiner
+        '👩',
+        '\u{200D}', // zero-width joiner
+        '👧',
+        '\u{200D}', // zero-width joiner
+        '👧',
+        error.InvalidUtf8, // 2-byte U+0000
+        error.InvalidUtf8, // 3-byte U+0000
+        error.InvalidUtf8, // 4-byte U+0000
+        error.InvalidUtf8, // attempted U+1FFFFF
+        error.InvalidUtf8, // U+D800
+        error.InvalidUtf8, // U+DFFF
+    };
+
+    var decoded = ArrayListUnmanaged(error{InvalidUtf8}!u21){};
+    defer decoded.deinit(testing.allocator);
+    var decoder = Utf8Decoder{};
+    for (input) |b| {
+        if (decoder.next(b)) |maybe_c| {
+            if (maybe_c) |c| {
+                try decoded.append(testing.allocator, c);
+            }
+        } else |err| {
+            try decoded.append(testing.allocator, err);
+        }
+    }
+
+    try testing.expectEqualDeep(expected, decoded.items);
+}
+
 pub const Utf16Endianness = enum {
     big,
     little,
@@ -251,7 +336,7 @@ pub const Utf16Endianness = enum {
 pub fn Utf16Decoder(comptime endianness: Utf16Endianness) type {
     return struct {
         buffer: BoundedArray(u8, 2) = .{},
-        high_unit: u16 = 0,
+        high_unit: ?u10 = null,
 
         const Self = @This();
 
@@ -265,9 +350,8 @@ pub fn Utf16Decoder(comptime endianness: Utf16Endianness) type {
                 return null;
             }
             const u = self.takeCodeUnit();
-            if (self.high_unit != 0) {
-                const high_unit = self.high_unit;
-                self.high_unit = 0;
+            if (self.high_unit) |high_unit| {
+                self.high_unit = null;
                 if (!isLowSurrogate(u)) {
                     return error.InvalidUtf16;
                 }
@@ -314,4 +398,82 @@ pub fn Utf16Decoder(comptime endianness: Utf16Endianness) type {
             return false;
         }
     };
+}
+
+test Utf16Decoder {
+    // little-endian
+    {
+        const input = "\x00\x00" ++ // U+0000
+            "A\x00" ++ // A
+            "b\x00" ++ // b
+            "5\x00" ++ // 5
+            "\xE5\x65" ++ // 日
+            "\x3D\xD8\x33\xDE" ++ // 😳
+            "\x00\xD8\x00\x00" ++ // unpaired high surrogate followed by U+0000
+            "\xFF\xDF" // unpaired low surrogate
+        ;
+        const expected: []const (error{InvalidUtf16}!u21) = &.{
+            '\x00',
+            'A',
+            'b',
+            '5',
+            '日',
+            '😳',
+            error.InvalidUtf16,
+            error.InvalidUtf16,
+        };
+
+        var decoded = ArrayListUnmanaged(error{InvalidUtf16}!u21){};
+        defer decoded.deinit(testing.allocator);
+        var decoder = Utf16Decoder(.little){};
+        for (input) |b| {
+            if (decoder.next(b)) |maybe_c| {
+                if (maybe_c) |c| {
+                    try decoded.append(testing.allocator, c);
+                }
+            } else |err| {
+                try decoded.append(testing.allocator, err);
+            }
+        }
+
+        try testing.expectEqualDeep(expected, decoded.items);
+    }
+
+    // big-endian
+    {
+        const input = "\x00\x00" ++ // U+0000
+            "\x00A" ++ // A
+            "\x00b" ++ // b
+            "\x005" ++ // 5
+            "\x65\xE5" ++ // 日
+            "\xD8\x3D\xDE\x33" ++ // 😳
+            "\xD8\x00\x00\x00" ++ // unpaired high surrogate followed by U+0000
+            "\xDF\xFF" // unpaired low surrogate
+        ;
+        const expected: []const (error{InvalidUtf16}!u21) = &.{
+            '\x00',
+            'A',
+            'b',
+            '5',
+            '日',
+            '😳',
+            error.InvalidUtf16,
+            error.InvalidUtf16,
+        };
+
+        var decoded = ArrayListUnmanaged(error{InvalidUtf16}!u21){};
+        defer decoded.deinit(testing.allocator);
+        var decoder = Utf16Decoder(.big){};
+        for (input) |b| {
+            if (decoder.next(b)) |maybe_c| {
+                if (maybe_c) |c| {
+                    try decoded.append(testing.allocator, c);
+                }
+            } else |err| {
+                try decoded.append(testing.allocator, err);
+            }
+        }
+
+        try testing.expectEqualDeep(expected, decoded.items);
+    }
 }
