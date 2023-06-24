@@ -2,8 +2,10 @@
 //!
 //! The central "interface" of this file is `Decoder`, which decodes XML
 //! content into Unicode codepoints for further processing. It consists
-//! of an error type `Error` and two functions:
+//! of an error type `Error` and several declarations:
 //!
+//! - `const max_encoded_codepoint_len` - the maximum number of bytes a
+//!    single Unicode codepoint may occupy in encoded form.
 //! - `fn next(self: *Decoder, b: u8) Error!?u21` - accepts a single byte of
 //!   input, returning an error if the byte is invalid in the current state of
 //!   the decoder, a valid Unicode codepoint, or `null` if the byte is valid
@@ -13,6 +15,9 @@
 //!   encoding cannot be handled by the decoder. This is intended to support
 //!   `Decoder` implementations which adapt to the encoding declared by an XML
 //!   document.
+//! - `fn isUtf8Compatible(self: Decoder) bool` - returns whether this decoder
+//!   decodes a subset of UTF-8. It is always safe to return false if this is
+//!   not known.
 
 const std = @import("std");
 const ascii = std.ascii;
@@ -38,6 +43,8 @@ pub const DefaultDecoder = struct {
     } = .start,
 
     pub const Error = error{ InvalidUtf8, InvalidUtf16 };
+
+    pub const max_encoded_codepoint_len = 4;
 
     pub fn next(self: *DefaultDecoder, b: u8) Error!?u21 {
         switch (self.state) {
@@ -74,6 +81,10 @@ pub const DefaultDecoder = struct {
             .start, .utf16_be_bom, .utf16_le_bom => {},
             inline else => |*decoder| try decoder.adaptTo(encoding),
         }
+    }
+
+    pub inline fn isUtf8Compatible(self: DefaultDecoder) bool {
+        return self.state == .utf8;
     }
 };
 
@@ -196,6 +207,8 @@ pub const Utf8Decoder = struct {
 
     pub const Error = error{InvalidUtf8};
 
+    pub const max_encoded_codepoint_len = 4;
+
     pub fn next(self: *Utf8Decoder, b: u8) Error!?u21 {
         if (self.expecting == 0) {
             const len = unicode.utf8ByteSequenceLength(b) catch return error.InvalidUtf8;
@@ -223,6 +236,10 @@ pub const Utf8Decoder = struct {
             return error.InvalidEncoding;
         }
     }
+
+    pub inline fn isUtf8Compatible(_: Utf8Decoder) bool {
+        return true;
+    }
 };
 
 pub const Utf16Endianness = enum {
@@ -239,6 +256,8 @@ pub fn Utf16Decoder(comptime endianness: Utf16Endianness) type {
         const Self = @This();
 
         pub const Error = error{InvalidUtf16};
+
+        pub const max_encoded_codepoint_len = 4;
 
         pub fn next(self: *Self, b: u8) Error!?u21 {
             self.buffer.appendAssumeCapacity(b);
@@ -289,6 +308,10 @@ pub fn Utf16Decoder(comptime endianness: Utf16Endianness) type {
             {
                 return error.InvalidEncoding;
             }
+        }
+
+        pub inline fn isUtf8Compatible(_: Self) bool {
+            return false;
         }
     };
 }

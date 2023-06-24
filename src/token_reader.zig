@@ -82,8 +82,6 @@ pub const Token = union(enum) {
     };
 };
 
-const max_encoded_codepoint_len = 4;
-
 /// Wraps a `std.io.Reader` in a `TokenReader` with the default buffer size
 /// (4096).
 pub fn tokenReader(
@@ -150,6 +148,9 @@ pub fn TokenReader(
         ///
         /// This is relevant for line break normalization.
         after_cr: if (options.enable_normalization) bool else void = if (options.enable_normalization) false,
+        /// The length of the raw codepoint data currently stored in `buffer`
+        /// starting at `scanner.pos`.
+        cp_len: usize = 0,
 
         const Self = @This();
 
@@ -159,6 +160,8 @@ pub fn TokenReader(
             SyntaxError,
             UnexpectedEndOfInput,
         } || ReaderType.Error || DecoderType.Error;
+
+        const max_encoded_codepoint_len = @max(DecoderType.max_encoded_codepoint_len, 4);
 
         pub fn init(reader: ReaderType, decoder: DecoderType) Self {
             return .{
@@ -206,12 +209,17 @@ pub fn TokenReader(
                     try self.scanner.endInput();
                     return null;
                 };
-                const c_len = unicode.utf8CodepointSequenceLength(c) catch unreachable;
-                if (self.scanner.pos + c_len >= self.buffer.len) {
-                    return error.Overflow;
+                if (!self.decoder.isUtf8Compatible()) {
+                    // If the decoder is not compatible with UTF-8, we have to
+                    // reencode the codepoint we just read into UTF-8, since
+                    // `buffer` must always be valid UTF-8.
+                    self.cp_len = unicode.utf8CodepointSequenceLength(c) catch unreachable;
+                    if (self.scanner.pos + self.cp_len >= self.buffer.len) {
+                        return error.Overflow;
+                    }
+                    _ = unicode.utf8Encode(c, self.buffer[self.scanner.pos .. self.scanner.pos + self.cp_len]) catch unreachable;
                 }
-                _ = unicode.utf8Encode(c, self.buffer[self.scanner.pos .. self.scanner.pos + c_len]) catch unreachable;
-                const token = try self.scanner.next(c, c_len);
+                const token = try self.scanner.next(c, self.cp_len);
                 if (token != .ok) {
                     return try self.bufToken(token);
                 }
@@ -233,16 +241,27 @@ pub fn TokenReader(
             if (b == '\r') {
                 self.after_cr = true;
                 b = '\n';
+                self.buffer[self.scanner.pos] = '\n';
             }
-            return if (self.scanner.state == .attribute_content and (b == '\t' or b == '\r' or b == '\n')) ' ' else b;
+            if (self.scanner.state == .attribute_content and (b == '\t' or b == '\r' or b == '\n')) {
+                b = ' ';
+                self.buffer[self.scanner.pos] = ' ';
+            }
+            return b;
         }
 
         fn nextCodepointRaw(self: *Self) !?u21 {
+            self.cp_len = 0;
             var b = self.reader.readByte() catch |e| switch (e) {
                 error.EndOfStream => return null,
                 else => |other| return other,
             };
             while (true) {
+                if (self.scanner.pos == self.buffer.len) {
+                    return error.Overflow;
+                }
+                self.buffer[self.scanner.pos + self.cp_len] = b;
+                self.cp_len += 1;
                 if (try self.decoder.next(b)) |c| {
                     return c;
                 }
