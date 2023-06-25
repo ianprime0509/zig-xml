@@ -480,7 +480,7 @@ pub fn Reader(
                             // no entry already exists with this key.
                             try self.pending_event.element_start.attributes.putNoClobber(event_allocator, current_attribute.name, .{
                                 .name = current_attribute.name,
-                                .value = try current_attribute.value.toOwnedSlice(event_allocator),
+                                .value = current_attribute.value.items,
                             });
                         }
                     },
@@ -589,7 +589,8 @@ pub fn Reader(
             var current_content = ArrayListUnmanaged(u8){};
             while (try self.next()) |event| {
                 if (event != .element_content and current_content.items.len > 0) {
-                    try element_children.append(allocator, .{ .text = .{ .content = try current_content.toOwnedSlice(allocator) } });
+                    try element_children.append(allocator, .{ .text = .{ .content = current_content.items } });
+                    current_content = .{};
                 }
                 switch (event) {
                     .xml_declaration => unreachable,
