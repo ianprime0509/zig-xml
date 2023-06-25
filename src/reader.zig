@@ -56,6 +56,16 @@ pub const QName = struct {
         const local = try allocator.dupe(u8, self.local);
         return .{ .prefix = prefix, .ns = ns, .local = local };
     }
+
+    /// Duplicates the `ns` value, if any.
+    ///
+    /// This is to allow the `QName` to outlive the closure of its containing
+    /// scope.
+    inline fn dupNs(self: *QName, allocator: Allocator) !void {
+        if (self.ns) |*ns| {
+            ns.* = try allocator.dupe(u8, ns.*);
+        }
+    }
 };
 
 /// An event emitted by a reader.
@@ -449,7 +459,8 @@ pub fn Reader(
                         if (!mem.eql(u8, expected_name, element_end.name)) {
                             return error.MismatchedEndTag;
                         }
-                        const qname = try (try self.namespace_context.parseName(element_end.name, true)).clone(event_allocator);
+                        var qname = try self.namespace_context.parseName(element_end.name, true);
+                        try qname.dupNs(event_allocator);
                         self.namespace_context.endScope(self.allocator);
                         return .{ .element_end = .{ .name = qname } };
                     },
@@ -460,7 +471,9 @@ pub fn Reader(
                         }
                         const name = self.element_names.pop();
                         defer self.allocator.free(name);
-                        const qname = try (try self.namespace_context.parseName(name, true)).clone(event_allocator);
+                        const dup_name = try event_allocator.dupe(u8, name);
+                        var qname = try self.namespace_context.parseName(dup_name, true);
+                        try qname.dupNs(event_allocator);
                         self.namespace_context.endScope(self.allocator);
                         return .{ .element_end = .{ .name = qname } };
                     },
