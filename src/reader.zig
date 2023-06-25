@@ -362,8 +362,7 @@ pub fn Reader(
             none,
             element_start: struct {
                 name: []const u8,
-                attributes: StringArrayHashMapUnmanaged(struct { name: []const u8, value: []const u8 }) = .{},
-                current_attribute: struct { name: []const u8, value: ArrayListUnmanaged(u8) = .{} } = undefined,
+                attributes: StringArrayHashMapUnmanaged(ArrayListUnmanaged(u8)) = .{},
             },
             comment: struct { content: ArrayListUnmanaged(u8) = .{} },
             pi: struct { target: []const u8, content: ArrayListUnmanaged(u8) = .{} },
@@ -466,23 +465,20 @@ pub fn Reader(
                         return .{ .element_end = .{ .name = qname } };
                     },
                     .attribute_start => |attribute_start| {
-                        if (self.pending_event.element_start.attributes.contains(attribute_start.name)) {
+                        var attr_entry = try self.pending_event.element_start.attributes.getOrPut(event_allocator, attribute_start.name);
+                        if (attr_entry.found_existing) {
                             return error.DuplicateAttribute;
                         }
-                        self.pending_event.element_start.current_attribute = .{ .name = try event_allocator.dupe(u8, attribute_start.name) };
+                        // The attribute name will be invalidated after we get
+                        // the next token, so we have to duplicate it here.
+                        // This doesn't change the hash of the key, so it's
+                        // safe to do this.
+                        attr_entry.key_ptr.* = try event_allocator.dupe(u8, attribute_start.name);
+                        attr_entry.value_ptr.* = .{};
                     },
                     .attribute_content => |attribute_content| {
-                        const current_attribute = &self.pending_event.element_start.current_attribute;
-                        try current_attribute.value.appendSlice(event_allocator, try self.contentText(attribute_content.content));
-                        if (attribute_content.final) {
-                            // We already checked for duplicate attribute names
-                            // when handling attribute_start, so we can be sure
-                            // no entry already exists with this key.
-                            try self.pending_event.element_start.attributes.putNoClobber(event_allocator, current_attribute.name, .{
-                                .name = current_attribute.name,
-                                .value = current_attribute.value.items,
-                            });
-                        }
+                        const attributes = self.pending_event.element_start.attributes.values();
+                        try attributes[attributes.len - 1].appendSlice(event_allocator, try self.contentText(attribute_content.content));
                     },
                     .comment_start => {
                         if (try self.finalizePendingEvent()) |event| {
@@ -531,22 +527,26 @@ pub fn Reader(
             switch (self.pending_event) {
                 .none => return null,
                 .element_start => |element_start| {
-                    for (element_start.attributes.values()) |attr| {
-                        if (mem.eql(u8, attr.name, "xmlns")) {
-                            try self.namespace_context.bindDefault(self.allocator, attr.value);
-                        } else if (mem.startsWith(u8, attr.name, "xmlns:")) {
-                            try self.namespace_context.bindPrefix(self.allocator, attr.name["xmlns:".len..], attr.value);
+                    // Bind all xmlns declarations in the current element
+                    for (element_start.attributes.keys(), element_start.attributes.values()) |attr_name, attr_value| {
+                        if (mem.eql(u8, attr_name, "xmlns")) {
+                            try self.namespace_context.bindDefault(self.allocator, attr_value.items);
+                        } else if (mem.startsWith(u8, attr_name, "xmlns:")) {
+                            try self.namespace_context.bindPrefix(self.allocator, attr_name["xmlns:".len..], attr_value.items);
                         }
                     }
+
+                    // Convert the element and attribute names to QNames
                     const qname = try self.namespace_context.parseName(element_start.name, true);
                     var attributes = ArrayListUnmanaged(Event.Attribute){};
                     try attributes.ensureTotalCapacity(event_allocator, element_start.attributes.count());
-                    for (element_start.attributes.values()) |attr| {
+                    for (element_start.attributes.keys(), element_start.attributes.values()) |attr_name, attr_value| {
                         attributes.appendAssumeCapacity(.{
-                            .name = try self.namespace_context.parseName(attr.name, false),
-                            .value = attr.value,
+                            .name = try self.namespace_context.parseName(attr_name, false),
+                            .value = attr_value.items,
                         });
                     }
+
                     self.pending_event = .none;
                     return .{ .element_start = .{ .name = qname, .attributes = attributes.items } };
                 },
