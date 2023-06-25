@@ -24,7 +24,7 @@ pub inline fn isDigit(c: u21) bool {
 
 /// Note: only valid if `isDigit` returns true.
 pub inline fn digitValue(c: u21) u4 {
-    return @intCast(u4, c - '0');
+    return @intCast(c - '0');
 }
 
 pub inline fn isHexDigit(c: u21) bool {
@@ -37,9 +37,9 @@ pub inline fn isHexDigit(c: u21) bool {
 /// Note: only valid if `isHexDigit` returns true.
 pub inline fn hexDigitValue(c: u21) u4 {
     return switch (c) {
-        'a'...'f' => @intCast(u4, c - 'a' + 10),
-        'A'...'F' => @intCast(u4, c - 'A' + 10),
-        else => @intCast(u4, c - '0'),
+        'a'...'f' => @intCast(c - 'a' + 10),
+        'A'...'F' => @intCast(c - 'A' + 10),
+        else => @intCast(c - '0'),
     };
 }
 

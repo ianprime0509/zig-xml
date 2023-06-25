@@ -575,7 +575,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         } else if (c == '"' or c == '\'') {
             self.state = .xml_decl_version_value_start;
             self.state_data.start = self.pos + len;
-            self.state_data.quote = @intCast(u8, c);
+            self.state_data.quote = @intCast(c);
             self.state_data.left = "1.";
             return .ok;
         } else {
@@ -654,7 +654,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             self.state = .xml_decl_encoding_value_start;
             // self.state_data.version = self.state_data.version;
             self.state_data.start = self.pos + len;
-            self.state_data.quote = @intCast(u8, c);
+            self.state_data.quote = @as(u8, @intCast(c));
             return .ok;
         } else {
             return error.SyntaxError;
@@ -728,7 +728,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             self.state = .xml_decl_standalone_value_start;
             // self.state_data.version = self.state_data.version;
             // self.state_data.encoding = self.state_data.encoding;
-            self.state_data.quote = @intCast(u8, c);
+            self.state_data.quote = @as(u8, @intCast(c));
             return .ok;
         } else {
             return error.SyntaxError;
@@ -1080,7 +1080,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
         } else if (c == '"' or c == '\'') {
             self.state = .attribute_content;
             self.state_data.start = self.pos + len;
-            self.state_data.quote = @intCast(u8, c);
+            self.state_data.quote = @as(u8, @intCast(c));
             return .ok;
         } else {
             return error.SyntaxError;
@@ -1152,14 +1152,14 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
             }
-            self.state_data.value = @intCast(u21, value);
+            self.state_data.value = @as(u21, @intCast(value));
             return .ok;
         } else if (self.state_data.hex and syntax.isHexDigit(c)) {
             const value = 16 * @as(u32, self.state_data.value) + syntax.hexDigitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
             }
-            self.state_data.value = @intCast(u21, value);
+            self.state_data.value = @as(u21, @intCast(value));
             return .ok;
         } else if (c == ';' and syntax.isChar(self.state_data.value)) {
             const codepoint = self.state_data.value;
@@ -1286,14 +1286,14 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) error{SyntaxError}!Token {
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
             }
-            self.state_data.value = @intCast(u21, value);
+            self.state_data.value = @as(u21, @intCast(value));
             return .ok;
         } else if (self.state_data.hex and syntax.isHexDigit(c)) {
             const value = 16 * @as(u32, self.state_data.value) + syntax.hexDigitValue(c);
             if (value > std.math.maxInt(u21)) {
                 return error.SyntaxError;
             }
-            self.state_data.value = @intCast(u21, value);
+            self.state_data.value = @as(u21, @intCast(value));
             return .ok;
         } else if (c == ';' and syntax.isChar(self.state_data.value)) {
             const codepoint = self.state_data.value;

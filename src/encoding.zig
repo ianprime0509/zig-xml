@@ -382,7 +382,7 @@ pub fn Utf16Decoder(comptime endianness: Utf16Endianness) type {
         }
 
         inline fn surrogateValue(u: u16) u10 {
-            return @intCast(u10, u & 0x3FF);
+            return @intCast(u & 0x3FF);
         }
 
         pub fn adaptTo(_: *Self, encoding: []const u8) error{InvalidEncoding}!void {
