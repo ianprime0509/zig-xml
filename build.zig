@@ -1,18 +1,21 @@
 const std = @import("std");
+const Build = std.Build;
+const CrossTarget = std.zig.CrossTarget;
+const Mode = std.builtin.Mode;
 
-pub fn build(b: *std.Build) void {
+pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const lib = b.addStaticLibrary(.{
-        .name = "zig-xml",
-        .root_source_file = .{ .path = "src/xml.zig" },
-        .target = target,
-        .optimize = optimize,
-    });
-    lib.emit_docs = .emit;
-    b.installArtifact(lib);
+    const xml = b.addModule("xml", .{ .source_file = .{ .path = "src/xml.zig" } });
 
+    addTests(b, target, optimize);
+    addDocs(b, target);
+    addExamples(b, target, optimize, xml);
+    addFuzz(b, target, xml);
+}
+
+fn addTests(b: *Build, target: CrossTarget, optimize: Mode) void {
     const main_tests = b.addTest(.{
         .root_source_file = .{ .path = "src/xml.zig" },
         .target = target,
@@ -23,9 +26,25 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_main_tests.step);
+}
 
-    const module = b.addModule("xml", .{ .source_file = .{ .path = "src/xml.zig" } });
+fn addDocs(b: *Build, target: CrossTarget) void {
+    const lib = b.addStaticLibrary(.{
+        .name = "zig-xml",
+        .root_source_file = .{ .path = "src/xml.zig" },
+        .target = target,
+        .optimize = .Debug,
+    });
+    // We don't actually care about the library itself, but zig build doesn't
+    // like it for some reason if we do this (it fails the step):
+    // lib.emit_bin = .no_emit;
+    lib.emit_docs = .emit;
 
+    const docs_step = b.step("docs", "Generate documentation");
+    docs_step.dependOn(&lib.step);
+}
+
+fn addExamples(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Module) void {
     const install_examples_step = b.step("install-examples", "Install examples");
 
     const scan_exe = b.addExecutable(.{
@@ -34,7 +53,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    scan_exe.addModule("xml", module);
+    scan_exe.addModule("xml", xml);
     install_examples_step.dependOn(&b.addInstallArtifact(scan_exe).step);
 
     const run_scan_exe = b.addRunArtifact(scan_exe);
@@ -51,7 +70,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    read_exe.addModule("xml", module);
+    read_exe.addModule("xml", xml);
     install_examples_step.dependOn(&b.addInstallArtifact(read_exe).step);
 
     const run_read_exe = b.addRunArtifact(read_exe);
@@ -61,8 +80,9 @@ pub fn build(b: *std.Build) void {
 
     const run_read_step = b.step("run-example-read", "Run read example");
     run_read_step.dependOn(&run_read_exe.step);
+}
 
-    // Fuzzing setup
+fn addFuzz(b: *Build, target: CrossTarget, xml: *Build.Module) void {
     // Thanks to https://www.ryanliptak.com/blog/fuzzing-zig-code/ for the basis of this!
     const fuzz_lib = b.addStaticLibrary(.{
         .name = "fuzz",
@@ -72,7 +92,7 @@ pub fn build(b: *std.Build) void {
     });
     fuzz_lib.want_lto = true;
     fuzz_lib.bundle_compiler_rt = true;
-    fuzz_lib.addModule("xml", module);
+    fuzz_lib.addModule("xml", xml);
 
     const fuzz_compile = b.addSystemCommand(&.{ "afl-clang-lto", "-o" });
     const fuzz_exe = fuzz_compile.addOutputFileArg("fuzz");
@@ -104,7 +124,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .Debug,
     });
-    fuzz_reproduce_exe.addModule("xml", module);
+    fuzz_reproduce_exe.addModule("xml", xml);
 
     const run_fuzz_reproduce_exe = b.addRunArtifact(fuzz_reproduce_exe);
     if (b.args) |args| {
