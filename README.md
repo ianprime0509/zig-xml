@@ -8,7 +8,8 @@ changes are highly likely. If you need a stable and well-tested XML library,
 bet (build setup for the popular libxml2 C library).
 
 See the documentation in the code for more information about the available APIs
-(start in `xml.zig`).
+(start in `xml.zig`). Autodocs are also published to GitHub Pages:
+http://ianjohnson.dev/zig-xml/
 
 ## Feature overview
 
@@ -58,6 +59,9 @@ Features:
 
 See the `examples` directory (these examples are not very good right now but
 they do show how to use most of the library).
+
+Another ("real-world") example can be found in the zig-gobject project:
+https://github.com/ianprime0509/zig-gobject/blob/main/src/gir.zig
 
 ## Fuzzing
 
