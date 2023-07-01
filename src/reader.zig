@@ -136,7 +136,7 @@ const predefined_ns_prefixes = ComptimeStringMap([]const u8, .{
 /// The context maintains a hierarchy of namespace scopes. Initially, there is
 /// no active scope (corresponding to the beginning of a document, before the
 /// start of the root element).
-const NamespaceContext = struct {
+pub const NamespaceContext = struct {
     scopes: ArrayListUnmanaged(StringHashMapUnmanaged([]const u8)) = .{},
 
     pub fn deinit(self: *NamespaceContext, allocator: Allocator) void {
@@ -233,22 +233,22 @@ const NamespaceContext = struct {
 
 /// A drop-in replacement for `NamespaceContext` which doesn't actually do any
 /// namespace processing.
-const UnawareNamespaceContext = struct {
-    pub inline fn deinit(_: *UnawareNamespaceContext, _: Allocator) void {}
+pub const NoOpNamespaceContext = struct {
+    pub inline fn deinit(_: *NoOpNamespaceContext, _: Allocator) void {}
 
-    pub inline fn startScope(_: *UnawareNamespaceContext, _: Allocator) !void {}
+    pub inline fn startScope(_: *NoOpNamespaceContext, _: Allocator) !void {}
 
-    pub inline fn endScope(_: *UnawareNamespaceContext, _: Allocator) void {}
+    pub inline fn endScope(_: *NoOpNamespaceContext, _: Allocator) void {}
 
-    pub inline fn bindDefault(_: *UnawareNamespaceContext, _: Allocator, _: []const u8) !void {}
+    pub inline fn bindDefault(_: *NoOpNamespaceContext, _: Allocator, _: []const u8) !void {}
 
-    pub inline fn bindPrefix(_: *UnawareNamespaceContext, _: Allocator, _: []const u8, _: []const u8) !void {}
+    pub inline fn bindPrefix(_: *NoOpNamespaceContext, _: Allocator, _: []const u8, _: []const u8) !void {}
 
-    pub inline fn getUri(_: UnawareNamespaceContext, _: []const u8) ?[]const u8 {
+    pub inline fn getUri(_: NoOpNamespaceContext, _: []const u8) ?[]const u8 {
         return null;
     }
 
-    pub inline fn parseName(_: UnawareNamespaceContext, name: []const u8, _: bool) !QName {
+    pub inline fn parseName(_: NoOpNamespaceContext, name: []const u8, _: bool) !QName {
         return .{ .local = name };
     }
 };
@@ -336,6 +336,8 @@ pub const ReaderOptions = struct {
     /// their `local` field populated, containing the full name of the element
     /// or attribute.
     namespace_aware: bool = true,
+    /// Whether to keep track of the current location in the document.
+    track_location: bool = false,
 };
 
 /// A streaming, pull-based XML parser wrapping a `std.io.Reader`.
@@ -361,7 +363,7 @@ pub fn Reader(
         /// A stack of element names enclosing the current context.
         element_names: ArrayListUnmanaged([]u8) = .{},
         /// The namespace context of the reader.
-        namespace_context: if (options.namespace_aware) NamespaceContext else UnawareNamespaceContext = .{},
+        namespace_context: if (options.namespace_aware) NamespaceContext else NoOpNamespaceContext = .{},
         /// A pending token which has been read but has not yet been handled as
         /// part of an event.
         pending_token: ?Token = null,
@@ -386,6 +388,7 @@ pub fn Reader(
         const TokenReaderType = TokenReader(ReaderType, DecoderType, .{
             .buffer_size = options.buffer_size,
             .enable_normalization = options.enable_normalization,
+            .track_location = options.track_location,
         });
 
         pub const Error = error{

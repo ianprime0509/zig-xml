@@ -82,6 +82,78 @@ pub const Token = union(enum) {
     };
 };
 
+/// A location in a file.
+pub const Location = struct {
+    /// The line number, starting at 1.
+    line: usize = 1,
+    /// The column number, starting at 1. Columns are counted using Unicode
+    /// codepoints.
+    column: usize = 1,
+    /// Whether the last character seen was a `\r`.
+    after_cr: bool = false,
+
+    /// Advances the location by a single codepoint.
+    pub fn advance(self: *Location, c: u21) void {
+        if (c == '\n') {
+            self.line += 1;
+            self.column = 1;
+            self.after_cr = false;
+        } else if (c == '\r') {
+            if (self.after_cr) {
+                self.line += 1;
+                self.column = 1;
+            }
+            self.column += 1;
+            self.after_cr = true;
+        } else if (self.after_cr) {
+            self.line += 1;
+            // Plain CR line endings cannot be detected as new lines
+            // immediately, since they could be followed by LF. The following
+            // character is what completes the line ending interpretation.
+            self.column = 2;
+            self.after_cr = false;
+        } else {
+            self.column += 1;
+        }
+    }
+};
+
+test Location {
+    var loc = Location{};
+    try expectLocation(loc, 1, 1);
+    loc.advance('A');
+    try expectLocation(loc, 1, 2);
+    loc.advance('よ');
+    try expectLocation(loc, 1, 3);
+    loc.advance('🥰');
+    try expectLocation(loc, 1, 4);
+    loc.advance('\n');
+    try expectLocation(loc, 2, 1);
+    loc.advance('\r');
+    loc.advance('\n');
+    try expectLocation(loc, 3, 1);
+    loc.advance('\r');
+    loc.advance('A');
+    try expectLocation(loc, 4, 2);
+    loc.advance('\r');
+    loc.advance('\r');
+    loc.advance('A');
+    try expectLocation(loc, 6, 2);
+}
+
+fn expectLocation(loc: Location, line: usize, column: usize) !void {
+    if (loc.line != line or loc.column != column) {
+        std.debug.print("expected {}:{}, found {}:{}", .{ line, column, loc.line, loc.column });
+        return error.TestExpectedEqual;
+    }
+}
+
+/// A drop-in replacement for `Location` which does not actually store location
+/// information.
+pub const NoOpLocation = struct {
+    pub inline fn advance(_: *NoOpLocation, _: u21) void {}
+};
+
 /// Wraps a `std.io.Reader` in a `TokenReader` with the default buffer size
 /// (4096).
 pub fn tokenReader(
@@ -107,6 +179,8 @@ pub const TokenReaderOptions = struct {
     /// the line ending sequence `\r\n` will appear as-is in returned tokens
     /// rather than the normalized `\n`.
     enable_normalization: bool = true,
+    /// Whether to keep track of the current location in the document.
+    track_location: bool = false,
 };
 
 /// An XML parser which wraps a `std.io.Reader` and returns low-level tokens.
@@ -139,6 +213,8 @@ pub fn TokenReader(
         scanner: Scanner,
         reader: ReaderType,
         decoder: DecoderType,
+        /// The current location in the file (if enabled).
+        location: if (options.track_location) Location else NoOpLocation = .{},
         /// Buffered content read by the reader for the current token.
         ///
         /// Events may reference this buffer via slices. The contents of the
@@ -262,6 +338,7 @@ pub fn TokenReader(
                 self.buffer[self.scanner.pos + self.cp_len] = b;
                 self.cp_len += 1;
                 if (try self.decoder.next(b)) |c| {
+                    self.location.advance(c);
                     return c;
                 }
                 b = self.reader.readByte() catch |e| switch (e) {
