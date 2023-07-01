@@ -6,7 +6,7 @@ const c = @cImport({
 pub const main = @import("common.zig").main;
 
 pub fn runBench(data: []const u8) !void {
-    const reader = c.xmlReaderForMemory(data.ptr, @intCast(c_int, data.len), null, "utf-8", 0);
+    const reader = c.xmlReaderForMemory(data.ptr, @intCast(data.len), null, "utf-8", 0);
     while (true) {
         switch (c.xmlTextReaderRead(reader)) {
             -1 => return error.ParseFailed,

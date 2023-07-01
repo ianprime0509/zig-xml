@@ -1,6 +1,6 @@
 bench/*.xml
 callgrind.out.*
-core.*
+core*
 docs
 fuzz/outputs
 zig-cache
