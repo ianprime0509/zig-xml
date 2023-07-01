@@ -157,9 +157,8 @@ pub fn TokenReader(
         pub const Error = error{
             InvalidEncoding,
             Overflow,
-            SyntaxError,
             UnexpectedEndOfInput,
-        } || ReaderType.Error || DecoderType.Error;
+        } || ReaderType.Error || DecoderType.Error || Scanner.Error;
 
         const max_encoded_codepoint_len = @max(DecoderType.max_encoded_codepoint_len, 4);
 

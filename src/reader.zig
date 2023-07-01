@@ -177,7 +177,7 @@ const NamespaceContext = struct {
     /// Only valid if there is a current scope.
     pub inline fn bindPrefix(self: *NamespaceContext, allocator: Allocator, prefix: []const u8, uri: []const u8) !void {
         if (!syntax.isNcName(prefix)) {
-            return error.InvalidNsPrefix;
+            return error.InvalidQName;
         }
         try self.bindInner(allocator, prefix, uri);
     }
@@ -391,7 +391,6 @@ pub fn Reader(
         pub const Error = error{
             CannotUndeclareNsPrefix,
             DuplicateAttribute,
-            InvalidNsPrefix,
             InvalidQName,
             MismatchedEndTag,
             UndeclaredEntityReference,
@@ -757,9 +756,9 @@ test "namespace handling" {
     try testInvalid(.{}, "<: />", error.InvalidQName);
     try testInvalid(.{}, "<a: />", error.InvalidQName);
     try testInvalid(.{}, "<:a />", error.InvalidQName);
-    try testInvalid(.{}, "<root xmlns:='urn:1' />", error.InvalidNsPrefix);
-    try testInvalid(.{}, "<root xmlns::='urn:1' />", error.InvalidNsPrefix);
-    try testInvalid(.{}, "<root xmlns:a:b='urn:1' />", error.InvalidNsPrefix);
+    try testInvalid(.{}, "<root xmlns:='urn:1' />", error.InvalidQName);
+    try testInvalid(.{}, "<root xmlns::='urn:1' />", error.InvalidQName);
+    try testInvalid(.{}, "<root xmlns:a:b='urn:1' />", error.InvalidQName);
     try testInvalid(.{}, "<root xmlns='urn:1' xmlns='urn:2' />", error.DuplicateAttribute);
     try testInvalid(.{}, "<root xmlns:abc='urn:1' xmlns:abc='urn:2' />", error.DuplicateAttribute);
 
