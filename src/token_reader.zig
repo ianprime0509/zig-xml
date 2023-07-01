@@ -3,6 +3,7 @@ const mem = std.mem;
 const testing = std.testing;
 const unicode = std.unicode;
 const encoding = @import("encoding.zig");
+const tracy = @import("tracy.zig");
 const Scanner = @import("Scanner.zig");
 
 /// A single XML token.
@@ -252,6 +253,9 @@ pub fn TokenReader(
         /// The slices in the returned token are only valid until the next call
         /// to `next`.
         pub fn next(self: *Self) Error!?Token {
+            const t = tracy.trace(@src(), null);
+            defer t.end();
+
             if (self.scanner.pos > 0) {
                 // If the scanner position is > 0, that means we emitted an event
                 // on the last call to next, and should try to reset the
@@ -305,6 +309,9 @@ pub fn TokenReader(
         const nextCodepoint = if (options.enable_normalization) nextCodepointNormalized else nextCodepointRaw;
 
         fn nextCodepointNormalized(self: *Self) !?u21 {
+            const t = tracy.trace(@src(), null);
+            defer t.end();
+
             var b = (try self.nextCodepointRaw()) orelse return null;
             if (self.after_cr) {
                 self.after_cr = false;
@@ -327,6 +334,9 @@ pub fn TokenReader(
         }
 
         fn nextCodepointRaw(self: *Self) !?u21 {
+            const t = tracy.trace(@src(), null);
+            defer t.end();
+
             self.cp_len = 0;
             var b = self.reader.readByte() catch |e| switch (e) {
                 error.EndOfStream => return null,
@@ -350,6 +360,9 @@ pub fn TokenReader(
         }
 
         fn bufToken(self: *Self, token: Scanner.Token) !Token {
+            const t = tracy.trace(@src(), null);
+            defer t.end();
+
             const buf_token: Token = switch (token) {
                 .ok => unreachable,
                 .xml_declaration => |xml_declaration| .{ .xml_declaration = .{

@@ -7,3 +7,9 @@
 [submodule "bench/lib/mxml"]
 	path = bench/lib/mxml
 	url = https://github.com/michaelrsweet/mxml.git
+[submodule "lib/zig-tracy"]
+	path = lib/zig-tracy
+	url = https://github.com/nektro/zig-tracy.git
+[submodule "lib/tracy"]
+	path = lib/tracy
+	url = https://github.com/wolfpld/tracy.git

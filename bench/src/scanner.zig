@@ -1,5 +1,7 @@
 const xml = @import("xml");
 
+pub const enable_tracy = true;
+
 pub const main = @import("common.zig").main;
 
 pub fn runBench(data: []const u8) !void {

@@ -55,6 +55,9 @@ fn addBench(b: *Build, name: []const u8) *Step.Compile {
         .root_source_file = .{ .path = b.fmt("src/{s}.zig", .{name}) },
         .optimize = .ReleaseFast,
     });
+    exe.linkLibCpp();
+    exe.addCSourceFile("../lib/tracy/public/TracyClient.cpp", &.{ "-DTRACY_ENABLE", "-fno-sanitize=undefined" });
+    exe.addIncludePath("../lib/tracy/public/tracy");
     b.installArtifact(exe);
     return exe;
 }

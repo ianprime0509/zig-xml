@@ -61,6 +61,7 @@ const std = @import("std");
 const testing = std.testing;
 const unicode = std.unicode;
 const syntax = @import("syntax.zig");
+const tracy = @import("tracy.zig");
 
 const Scanner = @This();
 
@@ -466,6 +467,9 @@ pub const Error = error{
 /// ranges, but it is also valid to use other interpretations (e.g. the user
 /// could always pass 1 if the input is already parsed into codepoints).
 pub fn next(self: *Scanner, c: u21, len: usize) Error!Token {
+    const t = tracy.trace(@src(), null);
+    defer t.end();
+
     const token = self.nextNoAdvance(c, len) catch |e| {
         self.state = .@"error";
         return e;

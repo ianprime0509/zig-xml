@@ -20,6 +20,7 @@
 //!   not known.
 
 const std = @import("std");
+const tracy = @import("tracy.zig");
 const ascii = std.ascii;
 const testing = std.testing;
 const unicode = std.unicode;
@@ -47,6 +48,9 @@ pub const DefaultDecoder = struct {
     pub const max_encoded_codepoint_len = 4;
 
     pub fn next(self: *DefaultDecoder, b: u8) Error!?u21 {
+        const t = tracy.trace(@src(), null);
+        defer t.end();
+
         switch (self.state) {
             .start => if (b == 0xFE) {
                 self.state = .utf16_be_bom;
@@ -210,6 +214,9 @@ pub const Utf8Decoder = struct {
     pub const max_encoded_codepoint_len = 4;
 
     pub fn next(self: *Utf8Decoder, b: u8) Error!?u21 {
+        const t = tracy.trace(@src(), null);
+        defer t.end();
+
         if (self.expecting == 0) {
             const len = unicode.utf8ByteSequenceLength(b) catch return error.InvalidUtf8;
             if (len == 1) {
@@ -345,6 +352,9 @@ pub fn Utf16Decoder(comptime endianness: Utf16Endianness) type {
         pub const max_encoded_codepoint_len = 4;
 
         pub fn next(self: *Self, b: u8) Error!?u21 {
+            const t = tracy.trace(@src(), null);
+            defer t.end();
+
             self.buffer.appendAssumeCapacity(b);
             if (self.buffer.len == 1) {
                 return null;

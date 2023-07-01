@@ -3,6 +3,8 @@ const c = @cImport({
     @cInclude("libxml/xmlreader.h");
 });
 
+pub const enable_tracy = true;
+
 pub const main = @import("common.zig").main;
 
 pub fn runBench(data: []const u8) !void {

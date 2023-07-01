@@ -1,5 +1,7 @@
 const c = @cImport(@cInclude("mxml.h"));
 
+pub const enable_tracy = true;
+
 pub const main = @import("common.zig").main;
 
 pub fn runBench(data: [:0]const u8) !void {

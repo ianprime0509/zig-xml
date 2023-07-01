@@ -11,6 +11,7 @@ const StringArrayHashMapUnmanaged = std.StringArrayHashMapUnmanaged;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 const encoding = @import("encoding.zig");
 const syntax = @import("syntax.zig");
+const tracy = @import("tracy.zig");
 const Node = @import("node.zig").Node;
 const OwnedValue = @import("node.zig").OwnedValue;
 const Scanner = @import("Scanner.zig");
@@ -461,6 +462,9 @@ pub fn Reader(
         ///
         /// The returned event is only valid until the next reader operation.
         pub fn next(self: *Self) Error!?Event {
+            const t = tracy.trace(@src(), null);
+            defer t.end();
+
             _ = self.event_arena.reset(.retain_capacity);
             const event_allocator = self.event_arena.allocator();
             while (true) {
