@@ -502,18 +502,22 @@ pub fn next(self: *Scanner, c: u21, len: usize) Error!Token {
 /// in case of success).
 fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
     switch (self.state) {
-        .start => if (c == 0xFEFF or syntax.isSpace(c)) {
+        .start => if (c == 0xFEFF) {
             self.state = .start_after_bom;
             return .ok;
         } else if (c == '<') {
             self.state = .start_unknown_start;
             return .ok;
+        } else if (syntax.isSpace(c)) {
+            self.state = .start_after_xml_decl;
+            return .ok;
         },
 
-        .start_after_bom => if (syntax.isSpace(c)) {
-            return .ok;
-        } else if (c == '<') {
+        .start_after_bom => if (c == '<') {
             self.state = .start_unknown_start;
+            return .ok;
+        } else if (syntax.isSpace(c)) {
+            self.state = .start_after_xml_decl;
             return .ok;
         },
 
@@ -1529,6 +1533,7 @@ test "XML declaration" {
         .{ .element_start = .{ .name = .{ .start = 63, .end = 67 } } },
         .element_end_empty,
     });
+    try testInvalid(" <?xml version='1.0'?>", error.InvalidPiTarget, 6);
     try testInvalid("<?xml version='1.0'encoding='UTF-8'?>", error.SyntaxError, 19);
     try testInvalid("<?xml version='1.0' encoding='UTF-8'standalone='yes'?>", error.SyntaxError, 36);
 }
