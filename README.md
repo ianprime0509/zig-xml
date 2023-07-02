@@ -63,6 +63,23 @@ they do show how to use most of the library).
 Another ("real-world") example can be found in the zig-gobject project:
 https://github.com/ianprime0509/zig-gobject/blob/main/src/gir.zig
 
+## Tests
+
+There are several tests in the project itself using the standard Zig test
+system. These tests can be run using `zig build test`.
+
+There is also a runner for the
+[W3C XML Conformance Test Suite](https://www.w3.org/XML/Test/) under
+`test/xmlconf.zig`. To build this runner as a standalone executable, run
+`zig build install-xmlconf`. If you download the 20130923 version of the test
+suite and place the `xmlconf` directory under `test`, you can also use
+`zig build run-xmlconf` to run all the test suites the runner can currently
+understand. The test suite files are not contained directly in this repository
+due to unclear licensing and file size (16MB uncompressed).
+
+Note: since the parser does not currently support doctype, most of the tests
+(any involving doctype) will be skipped.
+
 ## Fuzzing
 
 This library has some basic support for fuzz testing, taking its basic method

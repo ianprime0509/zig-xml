@@ -9,13 +9,13 @@ pub fn build(b: *Build) void {
 
     const xml = b.addModule("xml", .{ .source_file = .{ .path = "src/xml.zig" } });
 
-    addTests(b, target, optimize);
+    addTests(b, target, optimize, xml);
     addDocs(b, target);
     addExamples(b, target, optimize, xml);
     addFuzz(b, target, xml);
 }
 
-fn addTests(b: *Build, target: CrossTarget, optimize: Mode) void {
+fn addTests(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Module) void {
     const main_tests = b.addTest(.{
         .root_source_file = .{ .path = "src/xml.zig" },
         .target = target,
@@ -26,6 +26,46 @@ fn addTests(b: *Build, target: CrossTarget, optimize: Mode) void {
 
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_main_tests.step);
+
+    const xmlconf_exe = b.addExecutable(.{
+        .name = "xmlconf",
+        .root_source_file = .{ .path = "test/xmlconf.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    xmlconf_exe.addModule("xml", xml);
+
+    const install_xmlconf_step = b.step("install-xmlconf", "Install xmlconf test runner");
+    install_xmlconf_step.dependOn(&b.addInstallArtifact(xmlconf_exe).step);
+
+    const run_xmlconf_exe = b.addRunArtifact(xmlconf_exe);
+    if (b.args) |args| {
+        run_xmlconf_exe.addArgs(args);
+    }
+    // Since we can't yet handle doctypes, the test files need to be specified
+    // individually
+    run_xmlconf_exe.addArgs(&.{
+        "test/xmlconf/eduni/errata-2e/errata2e.xml",
+        "test/xmlconf/eduni/errata-3e/errata3e.xml",
+        "test/xmlconf/eduni/errata-4e/errata4e.xml",
+        "test/xmlconf/eduni/misc/ht-bh.xml",
+        "test/xmlconf/eduni/namespaces/1.0/rmt-ns10.xml",
+        "test/xmlconf/eduni/namespaces/1.1/rmt-ns11.xml",
+        "test/xmlconf/eduni/namespaces/errata-1e/errata1e.xml",
+        "test/xmlconf/eduni/xml-1.1/xml11.xml",
+        "test/xmlconf/ibm/ibm_oasis_invalid.xml",
+        "test/xmlconf/ibm/ibm_oasis_not-wf.xml",
+        "test/xmlconf/ibm/ibm_oasis_valid.xml",
+        "test/xmlconf/japanese/japanese.xml",
+        "test/xmlconf/oasis/oasis.xml",
+        // The test case files in the sun directory do not have an enclosing
+        // TESTCASES element, and only work when directly substituted as entity
+        // content, so they cannot be used at this time.
+        "test/xmlconf/xmltest/xmltest.xml",
+    });
+
+    const run_xmlconf_step = b.step("run-xmlconf", "Run xmlconf test cases");
+    run_xmlconf_step.dependOn(&run_xmlconf_exe.step);
 }
 
 fn addDocs(b: *Build, target: CrossTarget) void {
