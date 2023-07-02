@@ -385,6 +385,8 @@ pub const State = enum {
     ///
     /// Uses `hex`, `value`, `quote`.
     attribute_content_char_ref,
+    /// After attribute value.
+    attribute_after_content,
 
     /// Element end tag after consuming '</'.
     element_end,
@@ -1041,7 +1043,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
 
         .attribute_content => if (c == self.state_data.quote) {
             const text = Range{ .start = self.state_data.start, .end = self.pos };
-            self.state = .element_start_after_name;
+            self.state = .attribute_after_content;
             return .{ .attribute_content = .{ .content = .{ .text = text }, .final = true } };
         } else if (c == '&') {
             const text = Range{ .start = self.state_data.start, .end = self.pos };
@@ -1115,6 +1117,18 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             self.state_data.start = self.pos + len;
             // self.state_data.quote = self.state_data.quote;
             return .{ .attribute_content = .{ .content = .{ .codepoint = codepoint } } };
+        },
+
+        .attribute_after_content => if (syntax.isSpace(c)) {
+            self.state = .element_start_after_name;
+            return .ok;
+        } else if (c == '/') {
+            self.state = .element_start_empty;
+            return .ok;
+        } else if (c == '>') {
+            self.state = .content;
+            self.state_data.start = self.pos + len;
+            return .ok;
         },
 
         .element_end => if (syntax.isNameStartChar(c)) {
@@ -1638,7 +1652,26 @@ test "invalid content" {
     });
 }
 
-test "invalid attribute" {
+test "attributes" {
+    try testValid("<element attr1='1' attr2='2'/>", &.{
+        .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
+        .{ .attribute_start = .{ .name = .{ .start = 9, .end = 14 } } },
+        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 16, .end = 17 } }, .final = true } },
+        .{ .attribute_start = .{ .name = .{ .start = 19, .end = 24 } } },
+        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 26, .end = 27 } }, .final = true } },
+        .element_end_empty,
+    });
+    try testValid("<element attr1='1' attr2='2' />", &.{
+        .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
+        .{ .attribute_start = .{ .name = .{ .start = 9, .end = 14 } } },
+        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 16, .end = 17 } }, .final = true } },
+        .{ .attribute_start = .{ .name = .{ .start = 19, .end = 24 } } },
+        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 26, .end = 27 } }, .final = true } },
+        .element_end_empty,
+    });
+    try testInvalid("<element attr1='1'attr2='2'/>", error.SyntaxError, 18);
+    try testInvalid("<elementattr1='1'/>", error.SyntaxError, 13);
+
     try testInvalid("<element attr='<>' />", error.SyntaxError, 15);
     try testValid("<element attr='&lt;&gt;' />", &.{
         .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
@@ -1756,6 +1789,7 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
         .attribute_content_ref_start,
         .attribute_content_char_ref_start,
         .attribute_content_char_ref,
+        .attribute_after_content,
 
         .element_end,
         .element_end_after_name,
