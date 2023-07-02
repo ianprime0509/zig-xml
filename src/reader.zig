@@ -168,16 +168,31 @@ pub const NamespaceContext = struct {
     /// Binds the default namespace in the current scope.
     ///
     /// Only valid if there is a current scope.
-    pub inline fn bindDefault(self: *NamespaceContext, allocator: Allocator, uri: []const u8) !void {
+    pub fn bindDefault(self: *NamespaceContext, allocator: Allocator, uri: []const u8) !void {
+        if (mem.eql(u8, uri, xml_ns) or mem.eql(u8, uri, xmlns_ns)) {
+            return error.InvalidNsBinding;
+        }
         try self.bindInner(allocator, "", uri);
     }
 
     /// Binds a prefix in the current scope.
     ///
     /// Only valid if there is a current scope.
-    pub inline fn bindPrefix(self: *NamespaceContext, allocator: Allocator, prefix: []const u8, uri: []const u8) !void {
+    pub fn bindPrefix(self: *NamespaceContext, allocator: Allocator, prefix: []const u8, uri: []const u8) !void {
         if (!syntax.isNcName(prefix)) {
             return error.InvalidQName;
+        }
+        if (mem.eql(u8, prefix, "xml") and !mem.eql(u8, uri, xml_ns)) {
+            return error.InvalidNsBinding;
+        }
+        if (mem.eql(u8, uri, xml_ns) and !mem.eql(u8, prefix, "xml")) {
+            return error.InvalidNsBinding;
+        }
+        if (mem.eql(u8, prefix, "xmlns")) {
+            return error.InvalidNsBinding;
+        }
+        if (mem.eql(u8, uri, xmlns_ns) and !mem.eql(u8, prefix, "xmlns")) {
+            return error.InvalidNsBinding;
         }
         try self.bindInner(allocator, prefix, uri);
     }
@@ -394,6 +409,7 @@ pub fn Reader(
         pub const Error = error{
             CannotUndeclareNsPrefix,
             DuplicateAttribute,
+            InvalidNsBinding,
             InvalidQName,
             MismatchedEndTag,
             UndeclaredEntityReference,
@@ -770,6 +786,19 @@ test "namespace handling" {
     try testInvalid(.{}, "<root xmlns:a:b='urn:1' />", error.InvalidQName);
     try testInvalid(.{}, "<root xmlns='urn:1' xmlns='urn:2' />", error.DuplicateAttribute);
     try testInvalid(.{}, "<root xmlns:abc='urn:1' xmlns:abc='urn:2' />", error.DuplicateAttribute);
+    try testInvalid(.{}, "<root xmlns='http://www.w3.org/XML/1998/namespace' />", error.InvalidNsBinding);
+    try testInvalid(.{}, "<root xmlns:xml='urn:1' />", error.InvalidNsBinding);
+    try testValid(.{}, "<root xmlns:xml='http://www.w3.org/XML/1998/namespace' />", &.{
+        .{ .element_start = .{ .name = .{ .local = "root" }, .attributes = &.{
+            .{ .name = .{ .prefix = "xmlns", .ns = xmlns_ns, .local = "xml" }, .value = "http://www.w3.org/XML/1998/namespace" },
+        } } },
+        .{ .element_end = .{ .name = .{ .local = "root" } } },
+    });
+    try testInvalid(.{}, "<root xmlns:not-xml='http://www.w3.org/XML/1998/namespace' />", error.InvalidNsBinding);
+    try testInvalid(.{}, "<root xmlns='http://www.w3.org/2000/xmlns/' />", error.InvalidNsBinding);
+    try testInvalid(.{}, "<root xmlns:xmlns='urn:1' />", error.InvalidNsBinding);
+    try testInvalid(.{}, "<root xmlns:xmlns='http://www.w3.org/2000/xmlns/' />", error.InvalidNsBinding);
+    try testInvalid(.{}, "<root xmlns:not-xmlns='http://www.w3.org/2000/xmlns/' />", error.InvalidNsBinding);
 
     try testValid(.{ .namespace_aware = false },
         \\<a:root xmlns:a="urn:1">
