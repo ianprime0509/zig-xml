@@ -194,8 +194,15 @@ pub const State = enum {
     start_unknown_start,
     /// Start of a PI or XML declaration after '<?'.
     ///
-    /// Uses `start`, `xml_seen`.
+    /// Some part of 'xml' may have been matched. If this is not matched, the
+    /// state will transition to a normal `pi_start`.
+    ///
+    /// Uses `start`, `left`.
     pi_or_xml_decl_start,
+    /// Start of a PI or XML declaration after '<?xml'.
+    ///
+    /// Uses `start`.
+    pi_or_xml_decl_start_after_xml,
 
     /// XML declaration after '<?xml '.
     xml_decl,
@@ -311,7 +318,7 @@ pub const State = enum {
     pi,
     /// In PI target name.
     ///
-    /// Uses `start`, `xml_seen`.
+    /// Uses `start`.
     pi_target,
     /// After PI target.
     pi_after_target,
@@ -434,8 +441,6 @@ pub const State = enum {
         left: []const u8,
         // Attribute value
         quote: u8,
-        // PI or XML declaration
-        xml_seen: TokenMatcher("xml"),
         // Character reference
         hex: bool,
         value: u21,
@@ -445,38 +450,9 @@ pub const State = enum {
     };
 };
 
-/// A matcher which keeps track of whether the input does/might match a fixed
-/// ASCII token.
-fn TokenMatcher(comptime token: []const u8) type {
-    const invalid = token ++ "\x00";
-
-    return struct {
-        seen: []const u8 = "",
-
-        const Self = @This();
-
-        pub fn accept(self: Self, c: u21) Self {
-            if (self.seen.len < token.len and c == token[self.seen.len]) {
-                return .{ .seen = token[0 .. self.seen.len + 1] };
-            } else {
-                return .{ .seen = invalid };
-            }
-        }
-
-        pub fn matches(self: Self) bool {
-            return self.seen.len == token.len;
-        }
-
-        pub fn mightMatch(self: Self) bool {
-            return self.seen.len <= token.len;
-        }
-    };
-}
-
 pub const Error = error{
     DoctypeNotSupported,
     InvalidCharacterReference,
-    InvalidPiTarget,
     SyntaxError,
 };
 
@@ -528,43 +504,44 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
         } else if (c == '?') {
             self.state = .pi_or_xml_decl_start;
             self.state_data.start = self.pos + len;
-            self.state_data.xml_seen = .{};
+            self.state_data.left = "xml";
             return .ok;
         } else if (c == '!') {
             self.state = .unknown_start_bang;
             return .ok;
         },
 
-        .pi_or_xml_decl_start => if (syntax.isNameStartChar(c) or (syntax.isNameChar(c) and self.pos > self.state_data.start)) {
-            const xml_seen = self.state_data.xml_seen.accept(c);
-            if (xml_seen.mightMatch()) {
-                self.state_data.xml_seen = xml_seen;
-            } else {
-                self.state = .pi_target;
+        .pi_or_xml_decl_start => if (c == self.state_data.left[0]) {
+            if (self.state_data.left.len == 1) {
+                self.state = .pi_or_xml_decl_start_after_xml;
                 // self.state_data.start = self.state_data.start;
-                self.state_data.xml_seen = xml_seen;
+            } else {
+                self.state_data.left = self.state_data.left[1..];
             }
             return .ok;
+        } else if (syntax.isNameStartChar(c) or (syntax.isNameChar(c) and self.pos > self.state_data.start)) {
+            self.state = .pi_target;
+            // self.state_data.start = self.state_data.start;
+            return .ok;
         } else if (syntax.isSpace(c) and self.pos > self.state_data.start) {
-            if (self.state_data.xml_seen.matches()) {
-                self.state = .xml_decl;
-                return .ok;
-            } else {
-                const target = Range{ .start = self.state_data.start, .end = self.pos };
-                self.state = .pi_after_target;
-                return .{ .pi_start = .{ .target = target } };
-            }
+            const target = Range{ .start = self.state_data.start, .end = self.pos };
+            self.state = .pi_after_target;
+            return .{ .pi_start = .{ .target = target } };
         } else if (c == '?' and self.pos > self.state_data.start) {
-            if (self.state_data.xml_seen.matches()) {
-                // Can't have an XML declaration without a version
-                return error.SyntaxError;
-            } else {
-                const target = Range{ .start = self.state_data.start, .end = self.pos };
-                self.state = .pi_maybe_end;
-                self.state_data.start = self.pos;
-                self.state_data.end = self.pos;
-                return .{ .pi_start = .{ .target = target } };
-            }
+            const target = Range{ .start = self.state_data.start, .end = self.pos };
+            self.state = .pi_maybe_end;
+            self.state_data.start = self.pos;
+            self.state_data.end = self.pos;
+            return .{ .pi_start = .{ .target = target } };
+        },
+
+        .pi_or_xml_decl_start_after_xml => if (syntax.isSpace(c)) {
+            self.state = .xml_decl;
+            return .ok;
+        } else if (syntax.isNameChar(c)) {
+            self.state = .pi_target;
+            // self.state_data.start = self.state_data.start;
+            return .ok;
         },
 
         .xml_decl => if (syntax.isSpace(c)) {
@@ -884,31 +861,21 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
         .pi => if (syntax.isNameStartChar(c)) {
             self.state = .pi_target;
             self.state_data.start = self.pos;
-            self.state_data.xml_seen = (TokenMatcher("xml"){}).accept(c);
             return .ok;
         },
 
         .pi_target => if (syntax.isNameChar(c)) {
-            self.state_data.xml_seen = self.state_data.xml_seen.accept(c);
             return .ok;
         } else if (syntax.isSpace(c)) {
-            if (self.state_data.xml_seen.matches()) {
-                return error.InvalidPiTarget;
-            } else {
-                const target = Range{ .start = self.state_data.start, .end = self.pos };
-                self.state = .pi_after_target;
-                return .{ .pi_start = .{ .target = target } };
-            }
+            const target = Range{ .start = self.state_data.start, .end = self.pos };
+            self.state = .pi_after_target;
+            return .{ .pi_start = .{ .target = target } };
         } else if (c == '?') {
-            if (self.state_data.xml_seen.matches()) {
-                return error.InvalidPiTarget;
-            } else {
-                const target = Range{ .start = self.state_data.start, .end = self.pos };
-                self.state = .pi_maybe_end;
-                self.state_data.start = self.pos;
-                self.state_data.end = self.pos;
-                return .{ .pi_start = .{ .target = target } };
-            }
+            const target = Range{ .start = self.state_data.start, .end = self.pos };
+            self.state = .pi_maybe_end;
+            self.state_data.start = self.pos;
+            self.state_data.end = self.pos;
+            return .{ .pi_start = .{ .target = target } };
         },
 
         .pi_after_target => if (syntax.isSpace(c)) {
@@ -1533,7 +1500,6 @@ test "XML declaration" {
         .{ .element_start = .{ .name = .{ .start = 63, .end = 67 } } },
         .element_end_empty,
     });
-    try testInvalid(" <?xml version='1.0'?>", error.InvalidPiTarget, 6);
     try testInvalid("<?xml version='1.0'encoding='UTF-8'?>", error.SyntaxError, 19);
     try testInvalid("<?xml version='1.0' encoding='UTF-8'standalone='yes'?>", error.SyntaxError, 36);
 }
@@ -1630,10 +1596,6 @@ test "invalid XML declaration" {
     try testInvalid("<?xml version='1.0' encoding=\"UTF-?\"?>", error.SyntaxError, 34);
     try testInvalid("<?xml version='1.0' standalone='yno'?>", error.SyntaxError, 33);
     try testInvalid("<?xml version=\"1.0\" standalone=\"\"", error.SyntaxError, 32);
-}
-
-test "invalid PI" {
-    try testInvalid("<?xml version='1.0'?><?xml version='1.0'?>", error.InvalidPiTarget, 26);
 }
 
 test "invalid reference" {
@@ -1808,6 +1770,7 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
         // States which contain positional information but cannot immediately
         // be emitted as a token cannot be reset
         .pi_or_xml_decl_start,
+        .pi_or_xml_decl_start_after_xml,
 
         .xml_decl_version_value_start,
         .xml_decl_version_value,

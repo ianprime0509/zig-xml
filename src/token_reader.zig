@@ -232,6 +232,7 @@ pub fn TokenReader(
 
         pub const Error = error{
             InvalidEncoding,
+            InvalidPiTarget,
             Overflow,
             UnexpectedEndOfInput,
         } || ReaderType.Error || DecoderType.Error || Scanner.Error;
@@ -378,9 +379,15 @@ pub fn TokenReader(
                     .content = self.bufRange(comment_content.content),
                     .final = comment_content.final,
                 } },
-                .pi_start => |pi_start| .{ .pi_start = .{
-                    .target = self.bufRange(pi_start.target),
-                } },
+                .pi_start => |pi_start| pi_start: {
+                    const target = self.bufRange(pi_start.target);
+                    if (std.ascii.eqlIgnoreCase(target, "xml")) {
+                        return error.InvalidPiTarget;
+                    }
+                    break :pi_start .{ .pi_start = .{
+                        .target = target,
+                    } };
+                },
                 .pi_content => |pi_content| .{ .pi_content = .{
                     .content = self.bufRange(pi_content.content),
                     .final = pi_content.final,
@@ -494,6 +501,38 @@ test "normalization" {
     });
 }
 
+test "PI target" {
+    try testValid(.{}, "<?xml version='1.0'?><root><?some-pi?></root>", &.{
+        .{ .xml_declaration = .{ .version = "1.0" } },
+        .{ .element_start = .{ .name = "root" } },
+        .{ .pi_start = .{ .target = "some-pi" } },
+        .{ .pi_content = .{ .content = "", .final = true } },
+        .{ .element_end = .{ .name = "root" } },
+    });
+    try testValid(.{}, "<root><?x 2?></root>", &.{
+        .{ .element_start = .{ .name = "root" } },
+        .{ .pi_start = .{ .target = "x" } },
+        .{ .pi_content = .{ .content = "2", .final = true } },
+        .{ .element_end = .{ .name = "root" } },
+    });
+    try testValid(.{}, "<root><?xm 2?></root>", &.{
+        .{ .element_start = .{ .name = "root" } },
+        .{ .pi_start = .{ .target = "xm" } },
+        .{ .pi_content = .{ .content = "2", .final = true } },
+        .{ .element_end = .{ .name = "root" } },
+    });
+    try testValid(.{}, "<root><?xml2 2?></root>", &.{
+        .{ .element_start = .{ .name = "root" } },
+        .{ .pi_start = .{ .target = "xml2" } },
+        .{ .pi_content = .{ .content = "2", .final = true } },
+        .{ .element_end = .{ .name = "root" } },
+    });
+    try testInvalid(.{}, "<root><?xml?></root>", error.InvalidPiTarget);
+    try testInvalid(.{}, "<root><?XML?></root>", error.InvalidPiTarget);
+    try testInvalid(.{}, "<root><?Xml stuff?></root>", error.InvalidPiTarget);
+    try testInvalid(.{}, "<root><?xml version='1.0'?></root>", error.InvalidPiTarget);
+}
+
 fn testValid(comptime options: TokenReaderOptions, input: []const u8, expected_tokens: []const Token) !void {
     var input_stream = std.io.fixedBufferStream(input);
     var input_reader = tokenReader(input_stream.reader(), encoding.Utf8Decoder{}, options);
@@ -511,5 +550,13 @@ fn testValid(comptime options: TokenReaderOptions, input: []const u8, expected_t
     if (i != expected_tokens.len) {
         std.debug.print("Expected {} tokens, found {}\n", .{ expected_tokens.len, i });
         return error.TestFailed;
+    }
+}
+
+fn testInvalid(comptime options: TokenReaderOptions, input: []const u8, expected_error: anyerror) !void {
+    var input_stream = std.io.fixedBufferStream(input);
+    var input_reader = tokenReader(input_stream.reader(), encoding.Utf8Decoder{}, options);
+    while (input_reader.next()) |_| {} else |err| {
+        try testing.expectEqual(expected_error, err);
     }
 }
