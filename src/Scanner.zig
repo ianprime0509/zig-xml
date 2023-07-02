@@ -274,6 +274,11 @@ pub const State = enum {
     /// Start of document after XML declaration.
     start_after_xml_decl,
 
+    /// After some part of '<!DOCTYPE '.
+    ///
+    /// Ues `left`.
+    doctype_start,
+
     /// Top-level document content (outside the root element).
     document_content,
     /// A '<' has been encountered, but we don't know if it's an element, comment, etc.
@@ -449,6 +454,7 @@ fn TokenMatcher(comptime token: []const u8) type {
 }
 
 pub const Error = error{
+    DoctypeNotSupported,
     InvalidCharacterReference,
     InvalidPiTarget,
     SyntaxError,
@@ -501,7 +507,6 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             self.state_data.xml_seen = .{};
             return .ok;
         } else if (c == '!') {
-            // TODO: doctype
             self.state = .unknown_start_bang;
             return .ok;
         },
@@ -750,6 +755,15 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             return .ok;
         },
 
+        .doctype_start => if (c == self.state_data.left[0]) {
+            if (self.state_data.left.len == 1) {
+                return error.DoctypeNotSupported;
+            } else {
+                self.state_data.left = self.state_data.left[1..];
+                return .ok;
+            }
+        },
+
         .document_content => if (syntax.isSpace(c)) {
             return .ok;
         } else if (c == '<') {
@@ -779,6 +793,10 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             // Textual content is not allowed outside the root element.
             self.state = .cdata_before_start;
             self.state_data.left = "CDATA[";
+            return .ok;
+        } else if (self.depth == 0 and !self.seen_root_element and c == 'D') {
+            self.state = .doctype_start;
+            self.state_data.left = "OCTYPE ";
             return .ok;
         },
 
@@ -1436,6 +1454,13 @@ test "XML declaration" {
     });
 }
 
+test "doctype" {
+    try testInvalid("<!DOCTYPE root><root />", error.DoctypeNotSupported, 9);
+    try testInvalid("<?xml version='1.0'?><!DOCTYPE root><root />", error.DoctypeNotSupported, 30);
+    try testInvalid("<root /><!DOCTYPE root>", error.SyntaxError, 10);
+    try testInvalid("<root><!DOCTYPE root></root>", error.SyntaxError, 8);
+}
+
 test "references" {
     try testValid(
         \\<element attribute="Hello&#x2C;&#32;world &amp; friends!">&lt;Hi&#33;&#x21;&gt;</element>
@@ -1613,6 +1638,8 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
         .xml_decl_after_standalone,
         .xml_decl_end,
         .start_after_xml_decl,
+
+        .doctype_start,
 
         .document_content,
         .unknown_start,
