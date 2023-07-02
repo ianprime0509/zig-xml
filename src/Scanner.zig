@@ -324,9 +324,13 @@ pub const State = enum {
     ///
     /// Uses `start`.
     cdata,
-    /// In CDATA content after some part of ']]>'.
+    /// CDATA after one ']'.
     ///
-    /// Uses `start`, `end`, `left`.
+    /// Uses `start`, `end`.
+    cdata_maybe_before_end,
+    /// In CDATA content after more than one ']'.
+    ///
+    /// Uses `start`, `end`.
     cdata_maybe_end,
 
     /// Name of element start tag.
@@ -921,25 +925,36 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
         },
 
         .cdata => if (c == ']') {
-            self.state = .cdata_maybe_end;
+            self.state = .cdata_maybe_before_end;
             // self.state_data.start = self.state_data.start;
             self.state_data.end = self.pos;
-            self.state_data.left = "]>";
             return .ok;
         } else if (syntax.isChar(c)) {
             return .ok;
         },
 
-        .cdata_maybe_end => if (c == self.state_data.left[0]) {
-            if (self.state_data.left.len == 1) {
-                const text = Range{ .start = self.state_data.start, .end = self.state_data.end };
-                self.state = .content;
-                self.state_data.start = self.pos + len;
-                return .{ .element_content = .{ .content = .{ .text = text } } };
-            } else {
-                self.state_data.left = self.state_data.left[1..];
-                return .ok;
-            }
+        .cdata_maybe_before_end => if (c == ']') {
+            self.state = .cdata_maybe_end;
+            // self.state_data.start = self.state_data.start;
+            // self.state_data.end = self.state_data.end;
+            return .ok;
+        } else if (syntax.isChar(c)) {
+            self.state = .cdata;
+            // self.state_data.start = self.state_data.start;
+            return .ok;
+        },
+
+        .cdata_maybe_end => if (c == ']') {
+            // For every ']' after two have been encountered, the end
+            // position is incremented so only the final ']]>' marks the end of
+            // CDATA.
+            self.state_data.end += 1;
+            return .ok;
+        } else if (c == '>') {
+            const text = Range{ .start = self.state_data.start, .end = self.state_data.end };
+            self.state = .content;
+            self.state_data.start = self.pos + len;
+            return .{ .element_content = .{ .content = .{ .text = text } } };
         } else if (syntax.isChar(c)) {
             self.state = .cdata;
             // self.state_data.start = self.state_data.start;
@@ -1493,6 +1508,24 @@ test "doctype" {
     try testInvalid("<root><!DOCTYPE root></root>", error.SyntaxError, 8);
 }
 
+test "CDATA" {
+    try testValid("<element><![CDATA[Hi]]></element>", &.{
+        .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 18, .end = 20 } } } },
+        .{ .element_end = .{ .name = .{ .start = 25, .end = 32 } } },
+    });
+    try testValid("<element><![CDATA[Hi]]]></element>", &.{
+        .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 18, .end = 21 } } } },
+        .{ .element_end = .{ .name = .{ .start = 26, .end = 33 } } },
+    });
+    try testValid("<element><![CDATA[Hi]>]]]]]]]></element>", &.{
+        .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 18, .end = 27 } } } },
+        .{ .element_end = .{ .name = .{ .start = 32, .end = 39 } } },
+    });
+}
+
 test "references" {
     try testValid(
         \\<element attribute="Hello&#x2C;&#32;world &amp; friends!">&lt;Hi&#33;&#x21;&gt;</element>
@@ -1762,6 +1795,7 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
         .pi_target,
         .pi_maybe_end,
 
+        .cdata_maybe_before_end,
         .cdata_maybe_end,
 
         .element_start_name,

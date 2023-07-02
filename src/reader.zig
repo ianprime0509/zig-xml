@@ -721,6 +721,12 @@ test Reader {
     });
 }
 
+test "tag name matching" {
+    try testInvalid(.{}, "<one></two>", error.MismatchedEndTag);
+    try testInvalid(.{}, "<one><two></one></two>", error.MismatchedEndTag);
+    try testInvalid(.{}, "<one>Some content</two>More content</one>", error.MismatchedEndTag);
+}
+
 test "namespace handling" {
     try testValid(.{},
         \\<a:root xmlns:a="urn:1">
