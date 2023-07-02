@@ -32,6 +32,8 @@ const Suite = struct {
 const Test = struct {
     id: []const u8,
     type: Type,
+    version: ?[]const u8,
+    edition: ?[]const u8,
     entities: Entities,
     namespace: bool,
     sections: []const u8,
@@ -210,6 +212,8 @@ fn readSuite(allocator: Allocator, suite_dir: fs.Dir, suite_reader: anytype) !Su
 fn readTest(allocator: Allocator, suite_dir: fs.Dir, test_start: xml.Event.ElementStart, test_reader: anytype) !Test {
     var id: ?[]const u8 = null;
     var @"type": ?Test.Type = null;
+    var version: ?[]const u8 = null;
+    var edition: ?[]const u8 = null;
     var entities = Test.Entities.none;
     var namespace = true;
     var sections: ?[]const u8 = null;
@@ -222,6 +226,10 @@ fn readTest(allocator: Allocator, suite_dir: fs.Dir, test_start: xml.Event.Eleme
             id = try allocator.dupe(u8, attr.value);
         } else if (attr.name.is(null, "TYPE")) {
             @"type" = try Test.Type.parse(attr.value);
+        } else if (attr.name.is(null, "VERSION")) {
+            version = try allocator.dupe(u8, attr.value);
+        } else if (attr.name.is(null, "EDITION")) {
+            edition = try allocator.dupe(u8, attr.value);
         } else if (attr.name.is(null, "ENTITIES")) {
             entities = try Test.Entities.parse(attr.value);
         } else if (attr.name.is(null, "NAMESPACE")) {
@@ -245,6 +253,8 @@ fn readTest(allocator: Allocator, suite_dir: fs.Dir, test_start: xml.Event.Eleme
     return .{
         .id = id orelse return error.InvalidTest,
         .type = @"type" orelse return error.InvalidTest,
+        .version = version,
+        .edition = edition,
         .entities = entities,
         .namespace = namespace,
         .sections = sections orelse return error.InvalidTest,
@@ -272,6 +282,19 @@ fn runSuite(suite: Suite, ctx: anytype) !void {
 }
 
 fn runTest(@"test": Test, ctx: anytype) !void {
+    if (@"test".version) |version| {
+        if (!mem.eql(u8, version, "1.0")) {
+            return try ctx.skip(@"test", "only XML 1.0 is supported");
+        }
+    }
+    if (@"test".edition) |edition| {
+        // This check will technically be incorrect if a 15th edition is
+        // released at some point, which seems highly unlikely
+        if (mem.indexOfScalar(u8, edition, '5') == null) {
+            return try ctx.skip(@"test", "only the fifth edition of XML 1.0 is supported");
+        }
+    }
+
     switch (@"test".type) {
         .valid, .invalid => {
             var input_stream = io.fixedBufferStream(@"test".input);
