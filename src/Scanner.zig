@@ -380,6 +380,14 @@ pub const State = enum {
     ///
     /// Uses `start`.
     content,
+    /// Element content after encountering one ']'.
+    ///
+    /// Uses `start`.
+    content_cdata_maybe_before_end,
+    /// Element content after encountering more than one ']'.
+    ///
+    /// Uses `start`.
+    content_cdata_maybe_end,
     /// Element content after encountering '&'.
     content_ref_start,
     /// Element content within an entity reference name.
@@ -1136,7 +1144,27 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             return .ok;
         },
 
-        .content => if (c == '<') {
+        inline .content,
+        .content_cdata_maybe_before_end,
+        .content_cdata_maybe_end,
+        => |state| if (c == ']') {
+            switch (state) {
+                .content => {
+                    self.state = .content_cdata_maybe_before_end;
+                    // self.state_data.start = self.state_data.start;
+                },
+                .content_cdata_maybe_before_end => {
+                    self.state = .content_cdata_maybe_end;
+                    // self.state_data.start = self.state_data.start;
+                },
+                else => {},
+            }
+            return .ok;
+        } else if (state == .content_cdata_maybe_end and c == ']') {
+            return .ok;
+        } else if (state == .content_cdata_maybe_end and c == '>') {
+            return error.SyntaxError;
+        } else if (c == '<') {
             const text = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .unknown_start;
             if (text.isEmpty()) {
@@ -1156,6 +1184,10 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
                 return .{ .element_content = .{ .content = .{ .text = text } } };
             }
         } else if (syntax.isChar(c)) {
+            if (state != .content) {
+                self.state = .content;
+                // self.state_data.start = self.state_data.start;
+            }
             return .ok;
         },
 
@@ -1555,6 +1587,25 @@ test "invalid reference" {
     try testInvalid("<element attr='&#x110000;' />", error.InvalidCharacterReference, 24);
 }
 
+test "invalid content" {
+    try testInvalid("<element>Illegal: ]]></element>", error.SyntaxError, 20);
+    try testInvalid("<element>Also illegal: ]]]></element>", error.SyntaxError, 26);
+    try testValid("<element>]]&gt;</element>", &.{
+        .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 9, .end = 11 } } } },
+        .{ .element_content = .{ .content = .{ .entity = .{ .start = 12, .end = 14 } } } },
+        .{ .element_end = .{ .name = .{ .start = 17, .end = 24 } } },
+    });
+    try testValid("<element>[lol]<br/>[lmao]</element>", &.{
+        .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 9, .end = 14 } } } },
+        .{ .element_start = .{ .name = .{ .start = 15, .end = 17 } } },
+        .element_end_empty,
+        .{ .element_content = .{ .content = .{ .text = .{ .start = 19, .end = 25 } } } },
+        .{ .element_end = .{ .name = .{ .start = 27, .end = 34 } } },
+    });
+}
+
 test "invalid attribute" {
     try testInvalid("<element attr='<>' />", error.SyntaxError, 15);
     try testValid("<element attr='&lt;&gt;' />", &.{
@@ -1765,7 +1816,7 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
             }
         },
 
-        .content => token: {
+        .content, .content_cdata_maybe_before_end, .content_cdata_maybe_end => token: {
             const range = Range{ .start = self.state_data.start, .end = self.pos };
             self.state_data.start = 0;
             if (range.isEmpty()) {
