@@ -215,6 +215,10 @@ pub const State = enum {
     ///
     /// Uses `start`, `quote`.
     xml_decl_version_value,
+    /// XML declaration after version value.
+    ///
+    /// Uses `version`.
+    xml_decl_after_version_value,
     /// XML declaration after version info.
     ///
     /// Uses `version`.
@@ -239,6 +243,10 @@ pub const State = enum {
     ///
     /// Uses `version`, `start`, `quote`.
     xml_decl_encoding_value,
+    /// XML declaration after encoding value.
+    ///
+    /// Uses `version`, `encoding`.
+    xml_decl_after_encoding_value,
     /// XML declaration after encoding declaration.
     ///
     /// Uses `version`, `encoding`.
@@ -601,11 +609,21 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
         },
 
         .xml_decl_version_value => if (c == self.state_data.quote and self.pos > self.state_data.start + "1.".len) {
-            self.state = .xml_decl_after_version;
+            self.state = .xml_decl_after_version_value;
             self.state_data.version = .{ .start = self.state_data.start, .end = self.pos };
             return .ok;
         } else if (syntax.isDigit(c)) {
             return .ok;
+        },
+
+        .xml_decl_after_version_value => if (syntax.isSpace(c)) {
+            self.state = .xml_decl_after_version;
+            // self.state_data.version = self.state_data.version;
+            return .ok;
+        } else if (c == '?') {
+            const version = self.state_data.version;
+            self.state = .xml_decl_end;
+            return .{ .xml_declaration = .{ .version = version, .encoding = null, .standalone = null } };
         },
 
         .xml_decl_after_version => if (syntax.isSpace(c)) {
@@ -664,12 +682,24 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
         },
 
         .xml_decl_encoding_value => if (c == self.state_data.quote) {
-            self.state = .xml_decl_after_encoding;
+            self.state = .xml_decl_after_encoding_value;
             // self.state_data.version = self.state_data.version;
             self.state_data.encoding = .{ .start = self.state_data.start, .end = self.pos };
             return .ok;
         } else if (syntax.isEncodingChar(c)) {
             return .ok;
+        },
+
+        .xml_decl_after_encoding_value => if (syntax.isSpace(c)) {
+            self.state = .xml_decl_after_encoding;
+            // self.state_data.version = self.state_data.version;
+            // self.state_data.encoding = self.state_data.encoding;
+            return .ok;
+        } else if (c == '?') {
+            const version = self.state_data.version;
+            const encoding = self.state_data.encoding;
+            self.state = .xml_decl_end;
+            return .{ .xml_declaration = .{ .version = version, .encoding = encoding, .standalone = null } };
         },
 
         .xml_decl_after_encoding => if (syntax.isSpace(c)) {
@@ -1499,6 +1529,8 @@ test "XML declaration" {
         .{ .element_start = .{ .name = .{ .start = 63, .end = 67 } } },
         .element_end_empty,
     });
+    try testInvalid("<?xml version='1.0'encoding='UTF-8'?>", error.SyntaxError, 19);
+    try testInvalid("<?xml version='1.0' encoding='UTF-8'standalone='yes'?>", error.SyntaxError, 36);
 }
 
 test "doctype" {
@@ -1774,12 +1806,14 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
 
         .xml_decl_version_value_start,
         .xml_decl_version_value,
+        .xml_decl_after_version_value,
         .xml_decl_after_version,
         .xml_decl_encoding_name,
         .xml_decl_after_encoding_name,
         .xml_decl_after_encoding_equals,
         .xml_decl_encoding_value_start,
         .xml_decl_encoding_value,
+        .xml_decl_after_encoding_value,
         .xml_decl_after_encoding,
         .xml_decl_standalone_name,
         .xml_decl_after_standalone_name,
