@@ -1029,7 +1029,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             } else {
                 return .{ .attribute_content = .{ .content = .{ .text = text } } };
             }
-        } else if (syntax.isChar(c)) {
+        } else if (c != '<' and syntax.isChar(c)) {
             return .ok;
         },
 
@@ -1553,6 +1553,18 @@ test "invalid reference" {
     try testInvalid("<element attr='&#x1f0000;' />", error.InvalidCharacterReference, 24);
     try testInvalid("<element attr='&#xD800;' />", error.InvalidCharacterReference, 22);
     try testInvalid("<element attr='&#x110000;' />", error.InvalidCharacterReference, 24);
+}
+
+test "invalid attribute" {
+    try testInvalid("<element attr='<>' />", error.SyntaxError, 15);
+    try testValid("<element attr='&lt;&gt;' />", &.{
+        .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
+        .{ .attribute_start = .{ .name = .{ .start = 9, .end = 13 } } },
+        .{ .attribute_content = .{ .content = .{ .entity = .{ .start = 16, .end = 18 } } } },
+        .{ .attribute_content = .{ .content = .{ .entity = .{ .start = 20, .end = 22 } } } },
+        .{ .attribute_content = .{ .content = .{ .text = .{ .start = 23, .end = 23 } }, .final = true } },
+        .element_end_empty,
+    });
 }
 
 test "missing root element" {
