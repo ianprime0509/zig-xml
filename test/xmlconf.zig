@@ -123,6 +123,7 @@ fn context(allocator: Allocator, verbose: bool, tty_config: io.tty.Config, out: 
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
     const allocator = arena.allocator();
 
     var args_iter = try process.argsWithAllocator(allocator);
@@ -330,9 +331,17 @@ fn runTest(@"test": Test, ctx: anytype) !void {
 }
 
 fn runTestValid(@"test": Test, input_reader: anytype, ctx: anytype) !void {
-    while (input_reader.next()) |event| {
-        if (event == null) {
-            // TODO: compare canonical output
+    var buf = ArrayListUnmanaged(u8){};
+    defer buf.deinit(ctx.allocator);
+    while (input_reader.next()) |maybe_event| {
+        if (maybe_event) |event| {
+            try writeCanonical(ctx.allocator, &buf, event);
+        } else {
+            if (@"test".output) |output| {
+                if (!mem.eql(u8, buf.items, output)) {
+                    return try ctx.fail(@"test", "expected output does not match");
+                }
+            }
             return try ctx.pass(@"test");
         }
     } else |e| switch (e) {
@@ -382,4 +391,81 @@ fn runTestNonWf(@"test": Test, input_reader: anytype, ctx: anytype) !void {
         => return try ctx.pass(@"test"),
         else => |other_e| return other_e,
     }
+}
+
+fn writeCanonical(allocator: Allocator, buf: *ArrayListUnmanaged(u8), event: xml.Event) !void {
+    switch (event) {
+        .xml_declaration, .comment => {},
+        .element_start => |element_start| {
+            try buf.append(allocator, '<');
+            try writeQName(allocator, buf, element_start.name);
+            const attrs = try allocator.dupe(xml.Event.Attribute, element_start.attributes);
+            defer allocator.free(attrs);
+            std.sort.heap(xml.Event.Attribute, attrs, {}, attrLessThan);
+            for (attrs) |attr| {
+                try buf.append(allocator, ' ');
+                try writeQName(allocator, buf, attr.name);
+                try buf.appendSlice(allocator, "=\"");
+                try writeContent(allocator, buf, attr.value);
+                try buf.append(allocator, '"');
+            }
+            try buf.append(allocator, '>');
+        },
+        .element_content => |element_content| {
+            try writeContent(allocator, buf, element_content.content);
+        },
+        .element_end => |element_end| {
+            try buf.appendSlice(allocator, "</");
+            try writeQName(allocator, buf, element_end.name);
+            try buf.append(allocator, '>');
+        },
+        .pi => |pi| {
+            try buf.appendSlice(allocator, "<?");
+            try buf.appendSlice(allocator, pi.target);
+            try buf.append(allocator, ' ');
+            try buf.appendSlice(allocator, pi.content);
+            try buf.appendSlice(allocator, "?>");
+        },
+    }
+}
+
+fn writeQName(allocator: Allocator, buf: *ArrayListUnmanaged(u8), qname: xml.QName) !void {
+    if (qname.prefix) |prefix| {
+        try buf.appendSlice(allocator, prefix);
+        try buf.append(allocator, ':');
+    }
+    try buf.appendSlice(allocator, qname.local);
+}
+
+fn writeContent(allocator: Allocator, buf: *ArrayListUnmanaged(u8), content: []const u8) !void {
+    for (content) |c| {
+        switch (c) {
+            '&' => try buf.appendSlice(allocator, "&amp;"),
+            '<' => try buf.appendSlice(allocator, "&lt;"),
+            '>' => try buf.appendSlice(allocator, "&gt;"),
+            '"' => try buf.appendSlice(allocator, "&quot;"),
+            '\t' => try buf.appendSlice(allocator, "&#9;"),
+            '\n' => try buf.appendSlice(allocator, "&#10;"),
+            '\r' => try buf.appendSlice(allocator, "&#13"),
+            else => try buf.append(allocator, c),
+        }
+    }
+}
+
+fn attrLessThan(_: void, lhs: xml.Event.Attribute, rhs: xml.Event.Attribute) bool {
+    // This is a pretty stupid implementation, but it should work for all
+    // reasonable test cases
+    var lhs_buf: [1024]u8 = undefined;
+    const lhs_name = if (lhs.name.ns) |ns|
+        std.fmt.bufPrint(&lhs_buf, "{s}:{s}", .{ ns, lhs.name.local }) catch @panic("attribute name too long")
+    else
+        lhs.name.local;
+
+    var rhs_buf: [1024]u8 = undefined;
+    const rhs_name = if (rhs.name.ns) |ns|
+        std.fmt.bufPrint(&rhs_buf, "{s}:{s}", .{ ns, rhs.name.local }) catch @panic("attribute name too long")
+    else
+        rhs.name.local;
+
+    return mem.lessThan(u8, lhs_name, rhs_name);
 }
