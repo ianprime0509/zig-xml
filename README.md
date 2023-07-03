@@ -31,9 +31,8 @@ Features:
   - ✅ End-of-line and attribute value normalization (in `Reader` and
     `TokenReader` only, optional)
   - ✅ Namespace support (in `Reader` only, optional)
-  - ❌ Detailed errors (https://github.com/ianprime0509/zig-xml/issues/14)
-  - ❌ Source location tracking
-    (https://github.com/ianprime0509/zig-xml/issues/12)
+  - 🚧 Detailed errors
+  - 🚧 Source location tracking
   - ❌ `DOCTYPE` (just parsing, not doing anything with it)
     (https://github.com/ianprime0509/zig-xml/issues/9)
   - ❓️ Non-validating `DOCTYPE` handling (entity expansion, further attribute
