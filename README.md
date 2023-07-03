@@ -2,14 +2,28 @@
 
 zig-xml is an XML library for Zig.
 
-**Warning:** this library is still in early development. Bugs and breaking
-changes are highly likely. If you need a stable and well-tested XML library,
+**Warning:** this library is still in early development. It has been reasonably
+well-tested at this point, but it is lacking some important features, and its
+performance is not ideal. If you need a stable and well-tested XML library,
 [zig-libxml2](https://github.com/mitchellh/zig-libxml2) is probably your best
 bet (build setup for the popular libxml2 C library).
 
 See the documentation in the code for more information about the available APIs
 (start in `xml.zig`). Autodocs are also published to GitHub Pages:
 http://ianjohnson.dev/zig-xml/
+
+The library aims to confirm with the following standards:
+
+- [XML 1.0 Fifth Edition](https://www.w3.org/TR/2008/REC-xml-20081126/)
+- [XML Namespaces 1.0 Third Edition](https://www.w3.org/TR/2009/REC-xml-names-20091208/)
+
+Other standards (such as XML 1.1 or XML 1.0 prior to the fifth edition) are only
+supported insofar as they are compatible with the above standards. In practice,
+this should not make much difference, since XML 1.1 is rarely used, and the
+differences between XML 1.0 editions are minor (the XML 1.0 fifth edition
+standard allows many more characters in names than previous editions, subsuming
+the
+[only non-harmful feature of XML 1.1](http://www.ibiblio.org/xml/books/effectivexml/chapters/03.html)).
 
 ## Feature overview
 
@@ -76,8 +90,10 @@ suite and place the `xmlconf` directory under `test`, you can also use
 understand. The test suite files are not contained directly in this repository
 due to unclear licensing and file size (16MB uncompressed).
 
-Note: since the parser does not currently support doctype, most of the tests
-(any involving doctype) will be skipped.
+At the time of writing, the library passes all the conformance tests it is able
+to run (353 of them); the other tests are skipped because they involve doctype
+in one way or another or are for XML standards which aren't supported (XML 1.1,
+editions of XML 1.0 besides the fifth edition).
 
 ## Fuzzing
 
