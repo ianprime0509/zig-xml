@@ -414,6 +414,7 @@ pub fn Reader(
             MismatchedEndTag,
             UndeclaredEntityReference,
             UndeclaredNsPrefix,
+            QNameNotAllowed,
         } || Allocator.Error || TokenReaderType.Error;
 
         pub fn init(allocator: Allocator, r: ReaderType, decoder: DecoderType) Self {
@@ -530,6 +531,9 @@ pub fn Reader(
                         if (try self.finalizePendingEvent()) |event| {
                             self.pending_token = token;
                             return event;
+                        }
+                        if (options.namespace_aware and mem.indexOfScalar(u8, pi_start.target, ':') != null) {
+                            return error.QNameNotAllowed;
                         }
                         self.pending_event = .{ .pi = .{ .target = try event_allocator.dupe(u8, pi_start.target) } };
                     },
@@ -799,6 +803,7 @@ test "namespace handling" {
     try testInvalid(.{}, "<root xmlns:xmlns='urn:1' />", error.InvalidNsBinding);
     try testInvalid(.{}, "<root xmlns:xmlns='http://www.w3.org/2000/xmlns/' />", error.InvalidNsBinding);
     try testInvalid(.{}, "<root xmlns:not-xmlns='http://www.w3.org/2000/xmlns/' />", error.InvalidNsBinding);
+    try testInvalid(.{}, "<root><?ns:pi?></root>", error.QNameNotAllowed);
 
     try testValid(.{ .namespace_aware = false },
         \\<a:root xmlns:a="urn:1">
@@ -869,6 +874,11 @@ test "namespace handling" {
     });
     try testInvalid(.{ .namespace_aware = false }, "<root xmlns='urn:1' xmlns='urn:2' />", error.DuplicateAttribute);
     try testInvalid(.{ .namespace_aware = false }, "<root xmlns:abc='urn:1' xmlns:abc='urn:2' />", error.DuplicateAttribute);
+    try testValid(.{ .namespace_aware = false }, "<root><?ns:pi?></root>", &.{
+        .{ .element_start = .{ .name = .{ .local = "root" } } },
+        .{ .pi = .{ .target = "ns:pi", .content = "" } },
+        .{ .element_end = .{ .name = .{ .local = "root" } } },
+    });
 }
 
 fn testValid(comptime options: ReaderOptions, input: []const u8, expected_events: []const Event) !void {

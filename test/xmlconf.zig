@@ -351,6 +351,7 @@ fn runTestValid(@"test": Test, input_reader: anytype, ctx: anytype) !void {
         error.UndeclaredEntityReference,
         error.UndeclaredNsPrefix,
         error.UnexpectedEndOfInput,
+        error.QNameNotAllowed,
         => return try ctx.fail(@"test", @errorName(e)),
         else => |other_e| return other_e,
     }
@@ -377,6 +378,7 @@ fn runTestNonWf(@"test": Test, input_reader: anytype, ctx: anytype) !void {
         error.UndeclaredEntityReference,
         error.UndeclaredNsPrefix,
         error.UnexpectedEndOfInput,
+        error.QNameNotAllowed,
         => return try ctx.pass(@"test"),
         else => |other_e| return other_e,
     }
