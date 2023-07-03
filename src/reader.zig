@@ -68,6 +68,28 @@ pub const QName = struct {
     }
 };
 
+/// A hash map `Context` which compares namespace URIs and local names (that is,
+/// name identity according to the XML namespaces spec, since the prefix does
+/// not contribute to the identity of a QName).
+const QNameContext = struct {
+    const Self = @This();
+
+    pub fn hash(_: Self, name: QName) u64 {
+        var h = std.hash.Wyhash.init(0);
+        if (name.ns) |ns| {
+            h.update(ns);
+        }
+        h.update(name.local);
+        return h.final();
+    }
+
+    pub fn eql(_: Self, name1: QName, name2: QName) bool {
+        return name1.is(name2.ns, name2.local);
+    }
+};
+
+const QNameSet = std.HashMapUnmanaged(QName, void, QNameContext, std.hash_map.default_max_load_percentage);
+
 /// An event emitted by a reader.
 pub const Event = union(enum) {
     xml_declaration: XmlDeclaration,
@@ -575,11 +597,21 @@ pub fn Reader(
                     const qname = try self.namespace_context.parseName(element_start.name, true);
                     var attributes = ArrayListUnmanaged(Event.Attribute){};
                     try attributes.ensureTotalCapacity(event_allocator, element_start.attributes.count());
+                    // When namespaces are enabled, we need to check uniqueness
+                    // of attribute QNames according to the namespaces spec
+                    var attr_qnames = if (options.namespace_aware) QNameSet{};
+                    if (options.namespace_aware) {
+                        try attr_qnames.ensureTotalCapacity(event_allocator, @intCast(element_start.attributes.count()));
+                    }
                     for (element_start.attributes.keys(), element_start.attributes.values()) |attr_name, attr_value| {
-                        attributes.appendAssumeCapacity(.{
-                            .name = try self.namespace_context.parseName(attr_name, false),
-                            .value = attr_value.items,
-                        });
+                        const attr_qname = try self.namespace_context.parseName(attr_name, false);
+                        attributes.appendAssumeCapacity(.{ .name = attr_qname, .value = attr_value.items });
+                        if (options.namespace_aware) {
+                            var entry = attr_qnames.getOrPutAssumeCapacity(attr_qname);
+                            if (entry.found_existing) {
+                                return error.DuplicateAttribute;
+                            }
+                        }
                     }
 
                     self.pending_event = .none;
@@ -790,6 +822,7 @@ test "namespace handling" {
     try testInvalid(.{}, "<root xmlns:a:b='urn:1' />", error.InvalidQName);
     try testInvalid(.{}, "<root xmlns='urn:1' xmlns='urn:2' />", error.DuplicateAttribute);
     try testInvalid(.{}, "<root xmlns:abc='urn:1' xmlns:abc='urn:2' />", error.DuplicateAttribute);
+    try testInvalid(.{}, "<root xmlns:a='urn:1' xmlns:b='urn:1'><a a:attr='1' b:attr='2' /></root>", error.DuplicateAttribute);
     try testInvalid(.{}, "<root xmlns='http://www.w3.org/XML/1998/namespace' />", error.InvalidNsBinding);
     try testInvalid(.{}, "<root xmlns:xml='urn:1' />", error.InvalidNsBinding);
     try testValid(.{}, "<root xmlns:xml='http://www.w3.org/XML/1998/namespace' />", &.{
