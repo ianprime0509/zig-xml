@@ -78,10 +78,16 @@ fn addDocs(b: *Build, target: CrossTarget) void {
     // We don't actually care about the library itself, but zig build doesn't
     // like it for some reason if we do this (it fails the step):
     // lib.emit_bin = .no_emit;
-    lib.emit_docs = .emit;
+    const docs_path = lib.getOutputDocs();
+
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = docs_path,
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
 
     const docs_step = b.step("docs", "Generate documentation");
-    docs_step.dependOn(&lib.step);
+    docs_step.dependOn(&install_docs.step);
 }
 
 fn addExamples(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Module) void {
