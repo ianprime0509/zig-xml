@@ -42,6 +42,12 @@ pub const Event = @import("reader.zig").Event;
 pub const Node = @import("node.zig").Node;
 pub const OwnedValue = @import("node.zig").OwnedValue;
 
+pub const writer = @import("writer.zig").writer;
+pub const Writer = @import("writer.zig").Writer;
+pub const fmtAttributeContent = @import("writer.zig").fmtAttributeContent;
+pub const fmtElementContent = @import("writer.zig").fmtElementContent;
+pub const fmtQName = @import("writer.zig").fmtQName;
+
 test {
     testing.refAllDecls(@This());
 }

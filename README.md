@@ -65,7 +65,7 @@ Features:
   - ❓️ Other encodings besides these
   - ✅ User-definable additional encodings (meaning even though this library
     doesn't provide other encodings out of the box, you can write them yourself)
-- ❌ XML writer (https://github.com/ianprime0509/zig-xml/issues/10)
+- 🚧 XML writer (https://github.com/ianprime0509/zig-xml/issues/10)
 - 👎️ XPath, XML Schema, other XML-related stuff
 
 ## Examples
