@@ -69,16 +69,14 @@ fn addTests(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Module) 
 }
 
 fn addDocs(b: *Build, target: CrossTarget) void {
-    const lib = b.addStaticLibrary(.{
+    const obj = b.addObject(.{
         .name = "zig-xml",
         .root_source_file = .{ .path = "src/xml.zig" },
         .target = target,
         .optimize = .Debug,
     });
-    // We don't actually care about the library itself, but zig build doesn't
-    // like it for some reason if we do this (it fails the step):
-    // lib.emit_bin = .no_emit;
-    const docs_path = lib.getOutputDocs();
+    obj.emit_bin = .no_emit;
+    const docs_path = obj.getEmittedDocs();
 
     const install_docs = b.addInstallDirectory(.{
         .source_dir = docs_path,
