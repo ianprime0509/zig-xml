@@ -36,7 +36,7 @@ fn addTests(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Module) 
     xmlconf_exe.addModule("xml", xml);
 
     const install_xmlconf_step = b.step("install-xmlconf", "Install xmlconf test runner");
-    install_xmlconf_step.dependOn(&b.addInstallArtifact(xmlconf_exe).step);
+    install_xmlconf_step.dependOn(&b.addInstallArtifact(xmlconf_exe, .{}).step);
 
     const run_xmlconf_exe = b.addRunArtifact(xmlconf_exe);
     if (b.args) |args| {
@@ -75,7 +75,6 @@ fn addDocs(b: *Build, target: CrossTarget) void {
         .target = target,
         .optimize = .Debug,
     });
-    obj.emit_bin = .no_emit;
     const docs_path = obj.getEmittedDocs();
 
     const install_docs = b.addInstallDirectory(.{
@@ -98,7 +97,7 @@ fn addExamples(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Modul
         .optimize = optimize,
     });
     scan_exe.addModule("xml", xml);
-    install_examples_step.dependOn(&b.addInstallArtifact(scan_exe).step);
+    install_examples_step.dependOn(&b.addInstallArtifact(scan_exe, .{}).step);
 
     const run_scan_exe = b.addRunArtifact(scan_exe);
     if (b.args) |args| {
@@ -115,7 +114,7 @@ fn addExamples(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Modul
         .optimize = optimize,
     });
     read_exe.addModule("xml", xml);
-    install_examples_step.dependOn(&b.addInstallArtifact(read_exe).step);
+    install_examples_step.dependOn(&b.addInstallArtifact(read_exe, .{}).step);
 
     const run_read_exe = b.addRunArtifact(read_exe);
     if (b.args) |args| {
