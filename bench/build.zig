@@ -28,8 +28,8 @@ pub fn build(b: *Build) !void {
 
     const bench_yxml = addBench(b, "yxml");
     bench_yxml.linkLibC();
-    bench_yxml.addCSourceFile("lib/yxml/yxml.c", &.{});
-    bench_yxml.addIncludePath("lib/yxml");
+    bench_yxml.addCSourceFile(.{ .file = .{ .path = "lib/yxml/yxml.c" }, .flags = &.{} });
+    bench_yxml.addIncludePath(.{ .path = "lib/yxml" });
 
     const bench_mxml = addBench(b, "mxml");
     bench_mxml.linkLibC();
@@ -45,8 +45,8 @@ pub fn build(b: *Build) !void {
         "lib/mxml/mxml-set.c",
         "lib/mxml/mxml-string.c",
     }, &.{});
-    bench_mxml.addIncludePath("lib/mxml");
-    bench_mxml.addIncludePath("lib/mxml-config");
+    bench_mxml.addIncludePath(.{ .path = "lib/mxml" });
+    bench_mxml.addIncludePath(.{ .path = "lib/mxml-config" });
 }
 
 fn addBench(b: *Build, name: []const u8) *Step.Compile {
