@@ -1,10 +1,9 @@
 const std = @import("std");
-const libxml2 = @import("lib/zig-libxml2/libxml2.zig");
 const Build = std.Build;
 const Step = Build.Step;
 
 pub fn build(b: *Build) !void {
-    const xml = b.addModule("xml", .{ .source_file = .{ .path = "../src/xml.zig" } });
+    const xml = b.dependency("xml", .{}).module("xml");
 
     const bench_scanner = addBench(b, "scanner");
     bench_scanner.addModule("xml", xml);
@@ -18,13 +17,13 @@ pub fn build(b: *Build) !void {
     bench_reader.addModule("xml", xml);
     bench_reader.linkLibC();
 
-    const libxml2_lib = try libxml2.create(b, .{}, .ReleaseFast, .{
+    const libxml2 = b.dependency("libxml2", .{
         .iconv = false,
         .lzma = false,
         .zlib = false,
-    });
+    }).artifact("xml2");
     const bench_libxml2 = addBench(b, "libxml2");
-    libxml2_lib.link(bench_libxml2);
+    bench_libxml2.linkLibrary(libxml2);
 
     const bench_yxml = addBench(b, "yxml");
     bench_yxml.linkLibC();
@@ -33,7 +32,7 @@ pub fn build(b: *Build) !void {
 
     const bench_mxml = addBench(b, "mxml");
     bench_mxml.linkLibC();
-    bench_mxml.addCSourceFiles(&.{
+    bench_mxml.addCSourceFiles(.{ .files = &.{
         "lib/mxml/mxml-attr.c",
         "lib/mxml/mxml-entity.c",
         "lib/mxml/mxml-file.c",
@@ -44,7 +43,7 @@ pub fn build(b: *Build) !void {
         "lib/mxml/mxml-search.c",
         "lib/mxml/mxml-set.c",
         "lib/mxml/mxml-string.c",
-    }, &.{});
+    } });
     bench_mxml.addIncludePath(.{ .path = "lib/mxml" });
     bench_mxml.addIncludePath(.{ .path = "lib/mxml-config" });
 }
