@@ -224,9 +224,6 @@ pub fn TokenReader(
         ///
         /// This is relevant for line break normalization.
         after_cr: if (options.enable_normalization) bool else void = if (options.enable_normalization) false,
-        /// The length of the raw codepoint data currently stored in `buffer`
-        /// starting at `scanner.pos`.
-        cp_len: usize = 0,
 
         const Self = @This();
 
@@ -281,21 +278,12 @@ pub fn TokenReader(
                     }
                 }
 
-                const c = (try self.nextCodepoint()) orelse {
+                const c = try self.nextCodepoint();
+                if (!c.present) {
                     try self.scanner.endInput();
                     return null;
-                };
-                if (!self.decoder.isUtf8Compatible()) {
-                    // If the decoder is not compatible with UTF-8, we have to
-                    // reencode the codepoint we just read into UTF-8, since
-                    // `buffer` must always be valid UTF-8.
-                    self.cp_len = unicode.utf8CodepointSequenceLength(c) catch unreachable;
-                    if (self.scanner.pos + self.cp_len >= self.buffer.len) {
-                        return error.Overflow;
-                    }
-                    _ = unicode.utf8Encode(c, self.buffer[self.scanner.pos .. self.scanner.pos + self.cp_len]) catch unreachable;
                 }
-                const token = try self.scanner.next(c, self.cp_len);
+                const token = try self.scanner.next(c.codepoint, c.byte_length);
                 if (token != .ok) {
                     return try self.bufToken(token);
                 }
@@ -304,49 +292,36 @@ pub fn TokenReader(
 
         const nextCodepoint = if (options.enable_normalization) nextCodepointNormalized else nextCodepointRaw;
 
-        fn nextCodepointNormalized(self: *Self) !?u21 {
-            var b = (try self.nextCodepointRaw()) orelse return null;
+        fn nextCodepointNormalized(self: *Self) !encoding.ReadResult {
+            var c = try self.nextCodepointRaw();
+            if (!c.present) return c;
             if (self.after_cr) {
                 self.after_cr = false;
-                if (b == '\n') {
+                if (c.codepoint == '\n') {
                     // \n after \r is ignored because \r was already processed
                     // as a line ending
-                    b = (try self.nextCodepointRaw()) orelse return null;
+                    c = try self.nextCodepointRaw();
+                    if (!c.present) return c;
                 }
             }
-            if (b == '\r') {
+            if (c.codepoint == '\r') {
                 self.after_cr = true;
-                b = '\n';
+                c.codepoint = '\n';
                 self.buffer[self.scanner.pos] = '\n';
             }
-            if (self.scanner.state == .attribute_content and (b == '\t' or b == '\r' or b == '\n')) {
-                b = ' ';
+            if (self.scanner.state == .attribute_content and
+                (c.codepoint == '\t' or c.codepoint == '\r' or c.codepoint == '\n'))
+            {
+                c.codepoint = ' ';
                 self.buffer[self.scanner.pos] = ' ';
             }
-            return b;
+            return c;
         }
 
-        fn nextCodepointRaw(self: *Self) !?u21 {
-            self.cp_len = 0;
-            var b = self.reader.readByte() catch |e| switch (e) {
-                error.EndOfStream => return null,
-                else => |other| return other,
-            };
-            while (true) {
-                if (self.scanner.pos + self.cp_len == self.buffer.len) {
-                    return error.Overflow;
-                }
-                self.buffer[self.scanner.pos + self.cp_len] = b;
-                self.cp_len += 1;
-                if (try self.decoder.next(b)) |c| {
-                    self.location.advance(c);
-                    return c;
-                }
-                b = self.reader.readByte() catch |e| switch (e) {
-                    error.EndOfStream => return error.UnexpectedEndOfInput,
-                    else => |other| return other,
-                };
-            }
+        fn nextCodepointRaw(self: *Self) !encoding.ReadResult {
+            const c = try self.decoder.readCodepoint(self.reader, self.buffer[self.scanner.pos..]);
+            if (c.present) self.location.advance(c.codepoint);
+            return c;
         }
 
         fn bufToken(self: *Self, token: Scanner.Token) !Token {

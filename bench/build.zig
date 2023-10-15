@@ -18,6 +18,7 @@ pub fn build(b: *Build) !void {
     bench_reader.linkLibC();
 
     const libxml2 = b.dependency("libxml2", .{
+        .optimize = .ReleaseFast,
         .iconv = false,
         .lzma = false,
         .zlib = false,
