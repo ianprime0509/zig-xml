@@ -37,7 +37,7 @@ pub fn main() !void {
             return;
         };
         if (token != .ok) {
-            try stdout.print("{} ({}:{}): {}\n", .{ scanner.pos, line, column, token });
+            try stdout.print("{} ({}:{}): {}\n", .{ scanner.pos, line, column, scanner.fullToken(token) });
         }
         if (c.codepoint == '\n') {
             line += 1;

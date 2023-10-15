@@ -324,35 +324,35 @@ pub fn TokenReader(comptime ReaderType: type, comptime options: TokenReaderOptio
         fn bufToken(self: *Self, token: Scanner.Token) !Token {
             const buf_token: Token = switch (token) {
                 .ok => unreachable,
-                .xml_declaration => |xml_declaration| .{ .xml_declaration = .{
-                    .version = self.bufRange(xml_declaration.version),
-                    .encoding = if (xml_declaration.encoding) |enc| self.bufRange(enc) else null,
-                    .standalone = xml_declaration.standalone,
+                .xml_declaration => .{ .xml_declaration = .{
+                    .version = self.bufRange(self.scanner.token_data.xml_declaration.version),
+                    .encoding = if (self.scanner.token_data.xml_declaration.encoding) |enc| self.bufRange(enc) else null,
+                    .standalone = self.scanner.token_data.xml_declaration.standalone,
                 } },
-                .element_start => |element_start| .{ .element_start = .{
-                    .name = self.bufRange(element_start.name),
+                .element_start => .{ .element_start = .{
+                    .name = self.bufRange(self.scanner.token_data.element_start.name),
                 } },
-                .element_content => |element_content| .{ .element_content = .{
-                    .content = self.bufContent(element_content.content),
+                .element_content => .{ .element_content = .{
+                    .content = self.bufContent(self.scanner.token_data.element_content.content),
                 } },
-                .element_end => |element_end| .{ .element_end = .{
-                    .name = self.bufRange(element_end.name),
+                .element_end => .{ .element_end = .{
+                    .name = self.bufRange(self.scanner.token_data.element_end.name),
                 } },
                 .element_end_empty => .element_end_empty,
-                .attribute_start => |attribute_start| .{ .attribute_start = .{
-                    .name = self.bufRange(attribute_start.name),
+                .attribute_start => .{ .attribute_start = .{
+                    .name = self.bufRange(self.scanner.token_data.attribute_start.name),
                 } },
-                .attribute_content => |attribute_content| .{ .attribute_content = .{
-                    .content = self.bufContent(attribute_content.content),
-                    .final = attribute_content.final,
+                .attribute_content => .{ .attribute_content = .{
+                    .content = self.bufContent(self.scanner.token_data.attribute_content.content),
+                    .final = self.scanner.token_data.attribute_content.final,
                 } },
                 .comment_start => .comment_start,
-                .comment_content => |comment_content| .{ .comment_content = .{
-                    .content = self.bufRange(comment_content.content),
-                    .final = comment_content.final,
+                .comment_content => .{ .comment_content = .{
+                    .content = self.bufRange(self.scanner.token_data.comment_content.content),
+                    .final = self.scanner.token_data.comment_content.final,
                 } },
-                .pi_start => |pi_start| pi_start: {
-                    const target = self.bufRange(pi_start.target);
+                .pi_start => pi_start: {
+                    const target = self.bufRange(self.scanner.token_data.pi_start.target);
                     if (std.ascii.eqlIgnoreCase(target, "xml")) {
                         return error.InvalidPiTarget;
                     }
@@ -360,9 +360,9 @@ pub fn TokenReader(comptime ReaderType: type, comptime options: TokenReaderOptio
                         .target = target,
                     } };
                 },
-                .pi_content => |pi_content| .{ .pi_content = .{
-                    .content = self.bufRange(pi_content.content),
-                    .final = pi_content.final,
+                .pi_content => .{ .pi_content = .{
+                    .content = self.bufRange(self.scanner.token_data.pi_content.content),
+                    .final = self.scanner.token_data.pi_content.final,
                 } },
             };
             if (buf_token == .xml_declaration) {
