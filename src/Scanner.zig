@@ -40,6 +40,8 @@
 //! - Does not support `DOCTYPE` at all (using one will result in an error).
 //! - Not extensively tested/fuzzed.
 
+/// The data for the most recently returned token.
+token_data: Token.Data = .{ .ok = {} },
 /// The current state of the scanner.
 state: State = .start,
 /// Data associated with the current state of the scanner.
@@ -94,31 +96,73 @@ pub const Range = struct {
 ///   (e.g. element or attribute) if the buffer is reset in the middle of
 ///   content or there are other necessary intervening factors, such as CDATA
 ///   in the middle of normal (non-CDATA) element content.
-pub const Token = union(enum) {
+///
+/// For efficiency (avoiding copying when passing around tokens), `Token` is
+/// merely an enum specifying the token type. The actual token data is available
+/// in `Token.Data`, in the scanner's `token_data` field. The `fullToken`
+/// function can be used to get a `Token.Full`, which is a tagged union type and
+/// may be easier to consume in certain circumstances.
+pub const Token = enum {
     /// Continue processing: no new token to report yet.
     ok,
     /// XML declaration.
-    xml_declaration: XmlDeclaration,
+    xml_declaration,
     /// Element start tag.
-    element_start: ElementStart,
+    element_start,
     /// Element content.
-    element_content: ElementContent,
+    element_content,
     /// Element end tag.
-    element_end: ElementEnd,
+    element_end,
     /// End of an empty element.
     element_end_empty,
     /// Attribute start.
-    attribute_start: AttributeStart,
+    attribute_start,
     /// Attribute value content.
-    attribute_content: AttributeContent,
+    attribute_content,
     /// Comment start.
     comment_start,
     /// Comment content.
-    comment_content: CommentContent,
+    comment_content,
     /// Processing instruction (PI) start.
-    pi_start: PiStart,
+    pi_start,
     /// PI content.
-    pi_content: PiContent,
+    pi_content,
+
+    /// The data associated with a token.
+    ///
+    /// Even token types which have no associated data are represented here, to
+    /// provide some additional safety in safe build modes (where it can be
+    /// checked whether the caller is referencing the correct data field).
+    pub const Data = union {
+        ok: void,
+        xml_declaration: XmlDeclaration,
+        element_start: ElementStart,
+        element_content: ElementContent,
+        element_end: ElementEnd,
+        element_end_empty: void,
+        attribute_start: AttributeStart,
+        attribute_content: AttributeContent,
+        comment_start: void,
+        comment_content: CommentContent,
+        pi_start: PiStart,
+        pi_content: PiContent,
+    };
+
+    /// A token type plus data represented as a tagged union.
+    pub const Full = union(Token) {
+        ok,
+        xml_declaration: XmlDeclaration,
+        element_start: ElementStart,
+        element_content: ElementContent,
+        element_end: ElementEnd,
+        element_end_empty,
+        attribute_start: AttributeStart,
+        attribute_content: AttributeContent,
+        comment_start,
+        comment_content: CommentContent,
+        pi_start: PiStart,
+        pi_content: PiContent,
+    };
 
     pub const XmlDeclaration = struct {
         version: Range,
@@ -171,6 +215,29 @@ pub const Token = union(enum) {
         entity: Range,
     };
 };
+
+/// Returns the full token (including data) from the most recent call to `next`
+/// or `resetPos`. `token` must be the token returned from the last call to one
+/// of those functions.
+///
+/// ---
+///
+/// API note: the use of `self: *const Scanner` rather than `self: Scanner` is
+/// important to elimiate a potential footgun with the following code:
+///
+/// ```
+/// const full_token = scanner.fullToken(try scanner.next(c, len));
+/// ```
+///
+/// If `self: Scanner` is used, then Zig will evaluate `scanner` in its current
+/// state (for the expression `scanner.fullToken`) before calling
+/// `scanner.next`. This leads to the result being incorrect, since the `scanner`
+/// used for the `fullToken` call will have the old token data.
+pub fn fullToken(self: *const Scanner, token: Token) Token.Full {
+    return switch (token) {
+        inline else => |tag| @unionInit(Token.Full, @tagName(tag), @field(self.token_data, @tagName(tag))),
+    };
+}
 
 /// The possible states of the parser.
 ///
@@ -479,6 +546,10 @@ pub fn next(self: *Scanner, c: u21, len: usize) Error!Token {
 /// function is needed because Zig has no "successdefer" to advance `pos` only
 /// in case of success).
 fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
+    // It is easier to set the token_data to ok here rather than doing it
+    // individually each time before returning an ok token.
+    self.token_data = .{ .ok = {} };
+
     switch (self.state) {
         .start => if (c == 0xFEFF) {
             self.state = .start_after_bom;
@@ -528,13 +599,15 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
         } else if (syntax.isSpace(c) and self.pos > self.state_data.start) {
             const target = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .pi_after_target;
-            return .{ .pi_start = .{ .target = target } };
+            self.token_data = .{ .pi_start = .{ .target = target } };
+            return .pi_start;
         } else if (c == '?' and self.pos > self.state_data.start) {
             const target = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .pi_maybe_end;
             self.state_data.start = self.pos;
             self.state_data.end = self.pos;
-            return .{ .pi_start = .{ .target = target } };
+            self.token_data = .{ .pi_start = .{ .target = target } };
+            return .pi_start;
         },
 
         .pi_or_xml_decl_start_after_xml => if (syntax.isSpace(c)) {
@@ -606,7 +679,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
         } else if (c == '?') {
             const version = self.state_data.version;
             self.state = .xml_decl_end;
-            return .{ .xml_declaration = .{ .version = version, .encoding = null, .standalone = null } };
+            self.token_data = .{ .xml_declaration = .{ .version = version, .encoding = null, .standalone = null } };
+            return .xml_declaration;
         },
 
         .xml_decl_after_version => if (syntax.isSpace(c)) {
@@ -625,7 +699,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
         } else if (c == '?') {
             const version = self.state_data.version;
             self.state = .xml_decl_end;
-            return .{ .xml_declaration = .{ .version = version, .encoding = null, .standalone = null } };
+            self.token_data = .{ .xml_declaration = .{ .version = version, .encoding = null, .standalone = null } };
+            return .xml_declaration;
         },
 
         .xml_decl_encoding_name => if (c == self.state_data.left[0]) {
@@ -682,7 +757,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             const version = self.state_data.version;
             const encoding = self.state_data.encoding;
             self.state = .xml_decl_end;
-            return .{ .xml_declaration = .{ .version = version, .encoding = encoding, .standalone = null } };
+            self.token_data = .{ .xml_declaration = .{ .version = version, .encoding = encoding, .standalone = null } };
+            return .xml_declaration;
         },
 
         .xml_decl_after_encoding => if (syntax.isSpace(c)) {
@@ -697,7 +773,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             const version = self.state_data.version;
             const encoding = self.state_data.encoding;
             self.state = .xml_decl_end;
-            return .{ .xml_declaration = .{ .version = version, .encoding = encoding, .standalone = null } };
+            self.token_data = .{ .xml_declaration = .{ .version = version, .encoding = encoding, .standalone = null } };
+            return .xml_declaration;
         },
 
         .xml_decl_standalone_name => if (c == self.state_data.left[0]) {
@@ -736,14 +813,16 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             self.state = .xml_decl_standalone_value;
             // self.state_data.quote = self.state_data.quote;
             self.state_data.left = "es";
-            return .{ .xml_declaration = .{ .version = version, .encoding = encoding, .standalone = true } };
+            self.token_data = .{ .xml_declaration = .{ .version = version, .encoding = encoding, .standalone = true } };
+            return .xml_declaration;
         } else if (c == 'n') {
             const version = self.state_data.version;
             const encoding = self.state_data.encoding;
             self.state = .xml_decl_standalone_value;
             // self.state_data.quote = self.state_data.quote;
             self.state_data.left = "o";
-            return .{ .xml_declaration = .{ .version = version, .encoding = encoding, .standalone = false } };
+            self.token_data = .{ .xml_declaration = .{ .version = version, .encoding = encoding, .standalone = false } };
+            return .xml_declaration;
         },
 
         .xml_decl_standalone_value => if (c == self.state_data.left[0]) {
@@ -828,6 +907,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
         .comment_before_start => if (c == '-') {
             self.state = .comment;
             self.state_data.start = self.pos + len;
+            self.token_data = .{ .comment_start = {} };
             return .comment_start;
         },
 
@@ -843,7 +923,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
         .comment_maybe_before_end => if (c == '-') {
             const content = Range{ .start = self.state_data.start, .end = self.state_data.end };
             self.state = .comment_before_end;
-            return .{ .comment_content = .{ .content = content, .final = true } };
+            self.token_data = .{ .comment_content = .{ .content = content, .final = true } };
+            return .comment_content;
         } else if (syntax.isChar(c)) {
             self.state = .comment;
             // self.state_data.start = self.state_data.start;
@@ -871,13 +952,15 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
         } else if (syntax.isSpace(c)) {
             const target = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .pi_after_target;
-            return .{ .pi_start = .{ .target = target } };
+            self.token_data = .{ .pi_start = .{ .target = target } };
+            return .pi_start;
         } else if (c == '?') {
             const target = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .pi_maybe_end;
             self.state_data.start = self.pos;
             self.state_data.end = self.pos;
-            return .{ .pi_start = .{ .target = target } };
+            self.token_data = .{ .pi_start = .{ .target = target } };
+            return .pi_start;
         },
 
         .pi_after_target => if (syntax.isSpace(c)) {
@@ -910,7 +993,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
                 self.state = .content;
                 self.state_data.start = self.pos + len;
             }
-            return .{ .pi_content = .{ .content = content, .final = true } };
+            self.token_data = .{ .pi_content = .{ .content = content, .final = true } };
+            return .pi_content;
         } else if (syntax.isChar(c)) {
             self.state = .pi_content;
             // self.state_data.start = self.state_data.start;
@@ -957,7 +1041,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             const text = Range{ .start = self.state_data.start, .end = self.state_data.end };
             self.state = .content;
             self.state_data.start = self.pos + len;
-            return .{ .element_content = .{ .content = .{ .text = text } } };
+            self.token_data = .{ .element_content = .{ .content = .{ .text = text } } };
+            return .element_content;
         } else if (syntax.isChar(c)) {
             self.state = .cdata;
             // self.state_data.start = self.state_data.start;
@@ -970,18 +1055,21 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             self.depth += 1;
             const name = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .element_start_after_name;
-            return .{ .element_start = .{ .name = name } };
+            self.token_data = .{ .element_start = .{ .name = name } };
+            return .element_start;
         } else if (c == '/') {
             self.depth += 1;
             const name = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .element_start_empty;
-            return .{ .element_start = .{ .name = name } };
+            self.token_data = .{ .element_start = .{ .name = name } };
+            return .element_start;
         } else if (c == '>') {
             self.depth += 1;
             const name = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .content;
             self.state_data.start = self.pos + len;
-            return .{ .element_start = .{ .name = name } };
+            self.token_data = .{ .element_start = .{ .name = name } };
+            return .element_start;
         },
 
         .element_start_after_name => if (syntax.isSpace(c)) {
@@ -1010,6 +1098,7 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
                 self.state = .content;
                 self.state_data.start = self.pos + len;
             }
+            self.token_data = .{ .element_end_empty = {} };
             return .element_end_empty;
         },
 
@@ -1018,11 +1107,13 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
         } else if (syntax.isSpace(c)) {
             const name = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .attribute_after_name;
-            return .{ .attribute_start = .{ .name = name } };
+            self.token_data = .{ .attribute_start = .{ .name = name } };
+            return .attribute_start;
         } else if (c == '=') {
             const name = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .attribute_after_equals;
-            return .{ .attribute_start = .{ .name = name } };
+            self.token_data = .{ .attribute_start = .{ .name = name } };
+            return .attribute_start;
         },
 
         .attribute_after_name => if (syntax.isSpace(c)) {
@@ -1044,7 +1135,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
         .attribute_content => if (c == self.state_data.quote) {
             const text = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .attribute_after_content;
-            return .{ .attribute_content = .{ .content = .{ .text = text }, .final = true } };
+            self.token_data = .{ .attribute_content = .{ .content = .{ .text = text }, .final = true } };
+            return .attribute_content;
         } else if (c == '&') {
             const text = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .attribute_content_ref_start;
@@ -1053,7 +1145,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
                 // We do not want to emit an empty text content token between entities
                 return .ok;
             } else {
-                return .{ .attribute_content = .{ .content = .{ .text = text } } };
+                self.token_data = .{ .attribute_content = .{ .content = .{ .text = text } } };
+                return .attribute_content;
             }
         } else if (c != '<' and syntax.isChar(c)) {
             return .ok;
@@ -1077,7 +1170,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             self.state = .attribute_content;
             self.state_data.start = self.pos + len;
             // self.state_data.quote = self.state_data.quote;
-            return .{ .attribute_content = .{ .content = .{ .entity = entity } } };
+            self.token_data = .{ .attribute_content = .{ .content = .{ .entity = entity } } };
+            return .attribute_content;
         },
 
         .attribute_content_char_ref_start => if (syntax.isDigit(c)) {
@@ -1116,7 +1210,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             self.state = .attribute_content;
             self.state_data.start = self.pos + len;
             // self.state_data.quote = self.state_data.quote;
-            return .{ .attribute_content = .{ .content = .{ .codepoint = codepoint } } };
+            self.token_data = .{ .attribute_content = .{ .content = .{ .codepoint = codepoint } } };
+            return .attribute_content;
         },
 
         .attribute_after_content => if (syntax.isSpace(c)) {
@@ -1143,7 +1238,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             self.depth -= 1;
             const name = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .element_end_after_name;
-            return .{ .element_end = .{ .name = name } };
+            self.token_data = .{ .element_end = .{ .name = name } };
+            return .element_end;
         } else if (c == '>') {
             self.depth -= 1;
             if (self.depth == 0) {
@@ -1156,7 +1252,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
                 self.state = .content;
                 self.state_data.start = self.pos + len;
             }
-            return .{ .element_end = .{ .name = name } };
+            self.token_data = .{ .element_end = .{ .name = name } };
+            return .element_end;
         },
 
         .element_end_after_name => if (syntax.isSpace(c)) {
@@ -1203,7 +1300,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
                 // within e1 and e2).
                 return .ok;
             } else {
-                return .{ .element_content = .{ .content = .{ .text = text } } };
+                self.token_data = .{ .element_content = .{ .content = .{ .text = text } } };
+                return .element_content;
             }
         } else if (c == '&') {
             const text = Range{ .start = self.state_data.start, .end = self.pos };
@@ -1211,7 +1309,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             if (text.isEmpty()) {
                 return .ok;
             } else {
-                return .{ .element_content = .{ .content = .{ .text = text } } };
+                self.token_data = .{ .element_content = .{ .content = .{ .text = text } } };
+                return .element_content;
             }
         } else if (syntax.isChar(c)) {
             if (state != .content) {
@@ -1236,7 +1335,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             const entity = Range{ .start = self.state_data.start, .end = self.pos };
             self.state = .content;
             self.state_data.start = self.pos + len;
-            return .{ .element_content = .{ .content = .{ .entity = entity } } };
+            self.token_data = .{ .element_content = .{ .content = .{ .entity = entity } } };
+            return .element_content;
         },
 
         .content_char_ref_start => if (syntax.isDigit(c)) {
@@ -1272,7 +1372,8 @@ fn nextNoAdvance(self: *Scanner, c: u21, len: usize) Error!Token {
             }
             self.state = .content;
             self.state_data.start = self.pos + len;
-            return .{ .element_content = .{ .content = .{ .codepoint = codepoint } } };
+            self.token_data = .{ .element_content = .{ .content = .{ .codepoint = codepoint } } };
+            return .element_content;
         },
 
         .@"error" => return error.SyntaxError,
@@ -1696,9 +1797,9 @@ test "incomplete document" {
     try testIncomplete("<root></root");
 }
 
-fn testValid(input: []const u8, expected_tokens: []const Token) !void {
+fn testValid(input: []const u8, expected_tokens: []const Token.Full) !void {
     var scanner = Scanner{};
-    var tokens = std.ArrayListUnmanaged(Token){};
+    var tokens = std.ArrayListUnmanaged(Token.Full){};
     defer tokens.deinit(testing.allocator);
     var input_codepoints = (try unicode.Utf8View.init(input)).iterator();
     while (input_codepoints.nextCodepointSlice()) |c_bytes| {
@@ -1708,11 +1809,11 @@ fn testValid(input: []const u8, expected_tokens: []const Token) !void {
             return e;
         };
         if (token != .ok) {
-            try tokens.append(testing.allocator, token);
+            try tokens.append(testing.allocator, scanner.fullToken(token));
         }
     }
     try scanner.endInput();
-    try testing.expectEqualSlices(Token, expected_tokens, tokens.items);
+    try testing.expectEqualSlices(Token.Full, expected_tokens, tokens.items);
 }
 
 fn testInvalid(input: []const u8, expected_error: Error, expected_error_pos: usize) !void {
@@ -1749,6 +1850,8 @@ fn testIncomplete(input: []const u8) !void {
 /// underlying data cannot be cleared until the token is processed. If no token
 /// needs to be emitted, `Token.ok` is returned.
 pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
+    self.token_data = .{ .ok = {} };
+
     const token: Token = switch (self.state) {
         // States which contain no positional information can be reset at any
         // time with no additional token
@@ -1852,7 +1955,8 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
             if (range.isEmpty()) {
                 break :token .ok;
             } else {
-                break :token .{ .comment_content = .{ .content = range } };
+                self.token_data = .{ .comment_content = .{ .content = range } };
+                break :token .comment_content;
             }
         },
 
@@ -1862,7 +1966,8 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
             if (range.isEmpty()) {
                 break :token .ok;
             } else {
-                break :token .{ .pi_content = .{ .content = range } };
+                self.token_data = .{ .pi_content = .{ .content = range } };
+                break :token .pi_content;
             }
         },
 
@@ -1872,7 +1977,8 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
             if (range.isEmpty()) {
                 break :token .ok;
             } else {
-                break :token .{ .element_content = .{ .content = .{ .text = range } } };
+                self.token_data = .{ .element_content = .{ .content = .{ .text = range } } };
+                break :token .element_content;
             }
         },
 
@@ -1882,7 +1988,8 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
             if (range.isEmpty()) {
                 break :token .ok;
             } else {
-                break :token .{ .attribute_content = .{ .content = .{ .text = range } } };
+                self.token_data = .{ .attribute_content = .{ .content = .{ .text = range } } };
+                break :token .attribute_content;
             }
         },
 
@@ -1892,7 +1999,8 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
             if (range.isEmpty()) {
                 break :token .ok;
             } else {
-                break :token .{ .element_content = .{ .content = .{ .text = range } } };
+                self.token_data = .{ .element_content = .{ .content = .{ .text = range } } };
+                break :token .element_content;
             }
         },
     };
@@ -1902,24 +2010,24 @@ pub fn resetPos(self: *Scanner) error{CannotReset}!Token {
 
 test resetPos {
     var scanner = Scanner{};
-    var tokens = std.ArrayListUnmanaged(Token){};
+    var tokens = std.ArrayListUnmanaged(Token.Full){};
     defer tokens.deinit(testing.allocator);
 
     for ("<element>Hello,") |c| {
         switch (try scanner.next(c, 1)) {
             .ok => {},
-            else => |token| try tokens.append(testing.allocator, token),
+            else => |token| try tokens.append(testing.allocator, scanner.fullToken(token)),
         }
     }
-    try tokens.append(testing.allocator, try scanner.resetPos());
+    try tokens.append(testing.allocator, scanner.fullToken(try scanner.resetPos()));
     for (" world!</element>") |c| {
         switch (try scanner.next(c, 1)) {
             .ok => {},
-            else => |token| try tokens.append(testing.allocator, token),
+            else => |token| try tokens.append(testing.allocator, scanner.fullToken(token)),
         }
     }
 
-    try testing.expectEqualSlices(Token, &.{
+    try testing.expectEqualSlices(Token.Full, &.{
         .{ .element_start = .{ .name = .{ .start = 1, .end = 8 } } },
         .{ .element_content = .{ .content = .{ .text = .{ .start = 9, .end = 15 } } } },
         .{ .element_content = .{ .content = .{ .text = .{ .start = 0, .end = 7 } } } },
