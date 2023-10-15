@@ -27,19 +27,11 @@ pub fn main() !void {
 
     var line: usize = 1;
     var column: usize = 1;
-    read: while (true) {
-        var codepoint_bytes: usize = 0;
-        const c = while (true) {
-            const b = input_reader.readByte() catch |e| switch (e) {
-                error.EndOfStream => break :read,
-                else => |other| return other,
-            };
-            codepoint_bytes += 1;
-            if (try decoder.next(b)) |codepoint| {
-                break codepoint;
-            }
-        };
-        const token = scanner.next(c, codepoint_bytes) catch |e| {
+    while (true) {
+        var buf: [4]u8 = undefined;
+        const c = try decoder.readCodepoint(input_reader, &buf);
+        if (!c.present) break;
+        const token = scanner.next(c.codepoint, c.byte_length) catch |e| {
             try stdout_buffered_writer.flush();
             try stderr.print("error: {} ({}:{}): {}\n", .{ scanner.pos, line, column, e });
             return;
@@ -47,7 +39,7 @@ pub fn main() !void {
         if (token != .ok) {
             try stdout.print("{} ({}:{}): {}\n", .{ scanner.pos, line, column, token });
         }
-        if (c == '\n') {
+        if (c.codepoint == '\n') {
             line += 1;
             column = 1;
         } else {
