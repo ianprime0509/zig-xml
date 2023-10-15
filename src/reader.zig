@@ -161,6 +161,13 @@ const predefined_ns_prefixes = ComptimeStringMap([]const u8, .{
 pub const NamespaceContext = struct {
     scopes: ArrayListUnmanaged(StringHashMapUnmanaged([]const u8)) = .{},
 
+    pub const Error = error{
+        CannotUndeclareNsPrefix,
+        InvalidNsBinding,
+        InvalidQName,
+        UndeclaredNsPrefix,
+    };
+
     pub fn deinit(self: *NamespaceContext, allocator: Allocator) void {
         while (self.scopes.items.len > 0) {
             self.endScope(allocator);
@@ -271,6 +278,8 @@ pub const NamespaceContext = struct {
 /// A drop-in replacement for `NamespaceContext` which doesn't actually do any
 /// namespace processing.
 pub const NoOpNamespaceContext = struct {
+    pub const Error = error{};
+
     pub inline fn deinit(_: *NoOpNamespaceContext, _: Allocator) void {}
 
     pub inline fn startScope(_: *NoOpNamespaceContext, _: Allocator) !void {}
@@ -397,7 +406,7 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
         /// A stack of element names enclosing the current context.
         element_names: ArrayListUnmanaged([]u8) = .{},
         /// The namespace context of the reader.
-        namespace_context: if (options.namespace_aware) NamespaceContext else NoOpNamespaceContext = .{},
+        namespace_context: NamespaceContextType = .{},
         /// A pending token which has been read but has not yet been handled as
         /// part of an event.
         pending_token: ?Token = null,
@@ -425,17 +434,14 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
             .enable_normalization = options.enable_normalization,
             .track_location = options.track_location,
         });
+        const NamespaceContextType = if (options.namespace_aware) NamespaceContext else NoOpNamespaceContext;
 
         pub const Error = error{
-            CannotUndeclareNsPrefix,
             DuplicateAttribute,
-            InvalidNsBinding,
-            InvalidQName,
             MismatchedEndTag,
             UndeclaredEntityReference,
-            UndeclaredNsPrefix,
             QNameNotAllowed,
-        } || Allocator.Error || TokenReaderType.Error;
+        } || Allocator.Error || TokenReaderType.Error || NamespaceContextType.Error;
 
         pub fn init(allocator: Allocator, r: ReaderType, decoder: options.DecoderType) Self {
             return .{
