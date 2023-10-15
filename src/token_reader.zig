@@ -158,14 +158,15 @@ pub const NoOpLocation = struct {
 /// (4096).
 pub fn tokenReader(
     reader: anytype,
-    decoder: anytype,
     comptime options: TokenReaderOptions,
-) TokenReader(@TypeOf(reader), @TypeOf(decoder), options) {
-    return TokenReader(@TypeOf(reader), @TypeOf(decoder), options).init(reader, decoder);
+) TokenReader(@TypeOf(reader), options) {
+    return TokenReader(@TypeOf(reader), options).init(reader, .{});
 }
 
 /// Options for a `TokenReader`.
 pub const TokenReaderOptions = struct {
+    /// The type of decoder to use.
+    DecoderType: type = encoding.DefaultDecoder,
     /// The size of the internal buffer.
     ///
     /// This limits the byte length of "non-splittable" content, such as
@@ -204,15 +205,11 @@ pub const TokenReaderOptions = struct {
 /// important. Additionally, `buffer_size` limits the maximum byte length of
 /// "unsplittable" content, such as element and attribute names (but not
 /// "splittable" content, such as element text content and attribute values).
-pub fn TokenReader(
-    comptime ReaderType: type,
-    comptime DecoderType: type,
-    comptime options: TokenReaderOptions,
-) type {
+pub fn TokenReader(comptime ReaderType: type, comptime options: TokenReaderOptions) type {
     return struct {
         scanner: Scanner,
         reader: ReaderType,
-        decoder: DecoderType,
+        decoder: options.DecoderType,
         /// The current location in the file (if enabled).
         location: if (options.track_location) Location else NoOpLocation = .{},
         /// Buffered content read by the reader for the current token.
@@ -232,11 +229,11 @@ pub fn TokenReader(
             InvalidPiTarget,
             Overflow,
             UnexpectedEndOfInput,
-        } || ReaderType.Error || DecoderType.Error || Scanner.Error;
+        } || ReaderType.Error || options.DecoderType.Error || Scanner.Error;
 
-        const max_encoded_codepoint_len = @max(DecoderType.max_encoded_codepoint_len, 4);
+        const max_encoded_codepoint_len = @max(options.DecoderType.max_encoded_codepoint_len, 4);
 
-        pub fn init(reader: ReaderType, decoder: DecoderType) Self {
+        pub fn init(reader: ReaderType, decoder: options.DecoderType) Self {
             return .{
                 .scanner = Scanner{},
                 .reader = reader,
@@ -510,7 +507,7 @@ test "PI target" {
 
 fn testValid(comptime options: TokenReaderOptions, input: []const u8, expected_tokens: []const Token) !void {
     var input_stream = std.io.fixedBufferStream(input);
-    var input_reader = tokenReader(input_stream.reader(), encoding.Utf8Decoder{}, options);
+    var input_reader = tokenReader(input_stream.reader(), options);
     var i: usize = 0;
     while (try input_reader.next()) |token| : (i += 1) {
         if (i >= expected_tokens.len) {
@@ -530,7 +527,7 @@ fn testValid(comptime options: TokenReaderOptions, input: []const u8, expected_t
 
 fn testInvalid(comptime options: TokenReaderOptions, input: []const u8, expected_error: anyerror) !void {
     var input_stream = std.io.fixedBufferStream(input);
-    var input_reader = tokenReader(input_stream.reader(), encoding.Utf8Decoder{}, options);
+    var input_reader = tokenReader(input_stream.reader(), options);
     while (input_reader.next()) |_| {} else |err| {
         try testing.expectEqual(expected_error, err);
     }

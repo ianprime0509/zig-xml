@@ -294,10 +294,9 @@ pub const NoOpNamespaceContext = struct {
 pub fn reader(
     allocator: Allocator,
     r: anytype,
-    decoder: anytype,
     comptime options: ReaderOptions,
-) Reader(@TypeOf(r), @TypeOf(decoder), options) {
-    return Reader(@TypeOf(r), @TypeOf(decoder), options).init(allocator, r, decoder);
+) Reader(@TypeOf(r), options) {
+    return Reader(@TypeOf(r), options).init(allocator, r, .{});
 }
 
 /// Reads a full XML document from a `std.io.Reader`.
@@ -354,6 +353,8 @@ pub fn readDocument(
 
 /// Options for a `Reader`.
 pub const ReaderOptions = struct {
+    /// The type of decoder to use.
+    DecoderType: type = encoding.DefaultDecoder,
     /// The size of the internal buffer.
     ///
     /// This limits the byte length of "non-splittable" content, such as
@@ -390,11 +391,7 @@ pub const ReaderOptions = struct {
 /// Since this parser wraps a `TokenReader`, the caveats on the `buffer_size`
 /// bounding the length of "non-splittable" content which are outlined in its
 /// documentation apply here as well.
-pub fn Reader(
-    comptime ReaderType: type,
-    comptime DecoderType: type,
-    comptime options: ReaderOptions,
-) type {
+pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
     return struct {
         token_reader: TokenReaderType,
         /// A stack of element names enclosing the current context.
@@ -422,7 +419,8 @@ pub fn Reader(
         allocator: Allocator,
 
         const Self = @This();
-        const TokenReaderType = TokenReader(ReaderType, DecoderType, .{
+        const TokenReaderType = TokenReader(ReaderType, .{
+            .DecoderType = options.DecoderType,
             .buffer_size = options.buffer_size,
             .enable_normalization = options.enable_normalization,
             .track_location = options.track_location,
@@ -439,7 +437,7 @@ pub fn Reader(
             QNameNotAllowed,
         } || Allocator.Error || TokenReaderType.Error;
 
-        pub fn init(allocator: Allocator, r: ReaderType, decoder: DecoderType) Self {
+        pub fn init(allocator: Allocator, r: ReaderType, decoder: options.DecoderType) Self {
             return .{
                 .token_reader = TokenReaderType.init(r, decoder),
                 .event_arena = ArenaAllocator.init(allocator),
@@ -916,7 +914,7 @@ test "namespace handling" {
 
 fn testValid(comptime options: ReaderOptions, input: []const u8, expected_events: []const Event) !void {
     var input_stream = std.io.fixedBufferStream(input);
-    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, options);
+    var input_reader = reader(testing.allocator, input_stream.reader(), options);
     defer input_reader.deinit();
     var i: usize = 0;
     while (try input_reader.next()) |event| : (i += 1) {
@@ -937,7 +935,7 @@ fn testValid(comptime options: ReaderOptions, input: []const u8, expected_events
 
 fn testInvalid(comptime options: ReaderOptions, input: []const u8, expected_error: anyerror) !void {
     var input_stream = std.io.fixedBufferStream(input);
-    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, options);
+    var input_reader = reader(testing.allocator, input_stream.reader(), options);
     defer input_reader.deinit();
     while (input_reader.next()) |_| {} else |err| {
         try testing.expectEqual(expected_error, err);
@@ -966,7 +964,7 @@ test "nextNode" {
         \\
         \\
     );
-    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, .{});
+    var input_reader = reader(testing.allocator, input_stream.reader(), .{});
     defer input_reader.deinit();
 
     try testing.expectEqualDeep(@as(?Event, .{ .xml_declaration = .{ .version = "1.0" } }), try input_reader.next());
@@ -1015,7 +1013,7 @@ test "nextNode namespace handling" {
         \\  </child>
         \\</a:root>
     );
-    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, .{});
+    var input_reader = reader(testing.allocator, input_stream.reader(), .{});
     defer input_reader.deinit();
 
     var root_start = try input_reader.next();
@@ -1065,7 +1063,7 @@ test readDocument {
         \\
         \\
     );
-    var document_node = try readDocument(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, .{});
+    var document_node = try readDocument(testing.allocator, input_stream.reader(), .{});
     defer document_node.deinit();
 
     try testing.expectEqualDeep(Node.Document{ .version = "1.0", .children = &.{
@@ -1103,7 +1101,7 @@ test Children {
         \\  <child2><!-- Comment --><child3/></child2>
         \\</root>
     );
-    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, .{});
+    var input_reader = reader(testing.allocator, input_stream.reader(), .{});
     defer input_reader.deinit();
 
     try testing.expectEqualDeep(@as(?Event, .{ .element_start = .{ .name = .{ .local = "root" } } }), try input_reader.next());
@@ -1135,7 +1133,7 @@ test "skip children" {
         \\  <child2><!-- Comment --><child3/></child2>
         \\</root>
     );
-    var input_reader = reader(testing.allocator, input_stream.reader(), encoding.Utf8Decoder{}, .{});
+    var input_reader = reader(testing.allocator, input_stream.reader(), .{});
     defer input_reader.deinit();
 
     try testing.expectEqualDeep(@as(?Event, .{ .element_start = .{ .name = .{ .local = "root" } } }), try input_reader.next());

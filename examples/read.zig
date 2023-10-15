@@ -20,7 +20,7 @@ pub fn main() !void {
     const input_file = try std.fs.cwd().openFile(input_path, .{});
     defer input_file.close();
     var input_buffered_reader = std.io.bufferedReader(input_file.reader());
-    var reader = xml.reader(allocator, input_buffered_reader.reader(), xml.encoding.DefaultDecoder{}, .{});
+    var reader = xml.reader(allocator, input_buffered_reader.reader(), .{});
     defer reader.deinit();
 
     while (try reader.next()) |event| {
