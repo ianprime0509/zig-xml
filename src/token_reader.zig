@@ -6,29 +6,72 @@ const encoding = @import("encoding.zig");
 const Scanner = @import("Scanner.zig");
 
 /// A single XML token.
-pub const Token = union(enum) {
+///
+/// For efficiency, this is merely an enum specifying the token type. The actual
+/// token data is available in `Token.Data`, in the token reader's `token_data`
+/// field. The `fullToken` function can be used to get a `Token.Full`, which is
+/// a tagged union type and may be easier to consume in certain circumstances.
+pub const Token = enum {
+    /// End of file.
+    eof,
     /// XML declaration.
-    xml_declaration: XmlDeclaration,
+    xml_declaration,
     /// Element start tag.
-    element_start: ElementStart,
+    element_start,
     /// Element content.
-    element_content: ElementContent,
+    element_content,
     /// Element end tag.
-    element_end: ElementEnd,
+    element_end,
     /// End of an empty element.
     element_end_empty,
     /// Attribute start.
-    attribute_start: AttributeStart,
+    attribute_start,
     /// Attribute value content.
-    attribute_content: AttributeContent,
+    attribute_content,
     /// Comment start.
     comment_start,
     /// Comment content.
-    comment_content: CommentContent,
+    comment_content,
     /// Processing instruction (PI) start.
-    pi_start: PiStart,
+    pi_start,
     /// PI content.
-    pi_content: PiContent,
+    pi_content,
+
+    /// The data associated with a token.
+    ///
+    /// Even token types which have no associated data are represented here, to
+    /// provide some additional safety in safe build modes (where it can be
+    /// checked whether the caller is referencing the correct data field).
+    pub const Data = union {
+        eof: void,
+        xml_declaration: XmlDeclaration,
+        element_start: ElementStart,
+        element_content: ElementContent,
+        element_end: ElementEnd,
+        element_end_empty: void,
+        attribute_start: AttributeStart,
+        attribute_content: AttributeContent,
+        comment_start: void,
+        comment_content: CommentContent,
+        pi_start: PiStart,
+        pi_content: PiContent,
+    };
+
+    /// A token type plus data represented as a tagged union.
+    pub const Full = union(Token) {
+        eof,
+        xml_declaration: XmlDeclaration,
+        element_start: ElementStart,
+        element_content: ElementContent,
+        element_end: ElementEnd,
+        element_end_empty,
+        attribute_start: AttributeStart,
+        attribute_content: AttributeContent,
+        comment_start,
+        comment_content: CommentContent,
+        pi_start: PiStart,
+        pi_content: PiContent,
+    };
 
     pub const XmlDeclaration = struct {
         version: []const u8,
@@ -210,6 +253,8 @@ pub fn TokenReader(comptime ReaderType: type, comptime options: TokenReaderOptio
         scanner: Scanner,
         reader: ReaderType,
         decoder: options.DecoderType,
+        /// The data for the most recently returned token.
+        token_data: Token.Data = undefined,
         /// The current location in the file (if enabled).
         location: if (options.track_location) Location else NoOpLocation = .{},
         /// Buffered content read by the reader for the current token.
@@ -241,11 +286,20 @@ pub fn TokenReader(comptime ReaderType: type, comptime options: TokenReaderOptio
             };
         }
 
+        /// Returns the full token (including data) from the most recent call to
+        /// `next`. `token` must be the token returned from the last call to
+        /// `next`.
+        pub fn fullToken(self: *const Self, token: Token) Token.Full {
+            return switch (token) {
+                inline else => |tag| @unionInit(Token.Full, @tagName(tag), @field(self.token_data, @tagName(tag))),
+            };
+        }
+
         /// Returns the next token from the input.
         ///
-        /// The slices in the returned token are only valid until the next call
-        /// to `next`.
-        pub fn next(self: *Self) Error!?Token {
+        /// The slices in the `token_data` stored during this call are only
+        /// valid until the next call to `next`.
+        pub fn next(self: *Self) Error!Token {
             if (self.scanner.pos > 0) {
                 // If the scanner position is > 0, that means we emitted an event
                 // on the last call to next, and should try to reset the
@@ -278,7 +332,8 @@ pub fn TokenReader(comptime ReaderType: type, comptime options: TokenReaderOptio
                 const c = try self.nextCodepoint();
                 if (!c.present) {
                     try self.scanner.endInput();
-                    return null;
+                    self.token_data = .{ .eof = {} };
+                    return .eof;
                 }
                 const token = try self.scanner.next(c.codepoint, c.byte_length);
                 if (token != .ok) {
@@ -322,55 +377,83 @@ pub fn TokenReader(comptime ReaderType: type, comptime options: TokenReaderOptio
         }
 
         fn bufToken(self: *Self, token: Scanner.Token) !Token {
-            const buf_token: Token = switch (token) {
+            switch (token) {
                 .ok => unreachable,
-                .xml_declaration => .{ .xml_declaration = .{
-                    .version = self.bufRange(self.scanner.token_data.xml_declaration.version),
-                    .encoding = if (self.scanner.token_data.xml_declaration.encoding) |enc| self.bufRange(enc) else null,
-                    .standalone = self.scanner.token_data.xml_declaration.standalone,
-                } },
-                .element_start => .{ .element_start = .{
-                    .name = self.bufRange(self.scanner.token_data.element_start.name),
-                } },
-                .element_content => .{ .element_content = .{
-                    .content = self.bufContent(self.scanner.token_data.element_content.content),
-                } },
-                .element_end => .{ .element_end = .{
-                    .name = self.bufRange(self.scanner.token_data.element_end.name),
-                } },
-                .element_end_empty => .element_end_empty,
-                .attribute_start => .{ .attribute_start = .{
-                    .name = self.bufRange(self.scanner.token_data.attribute_start.name),
-                } },
-                .attribute_content => .{ .attribute_content = .{
-                    .content = self.bufContent(self.scanner.token_data.attribute_content.content),
-                    .final = self.scanner.token_data.attribute_content.final,
-                } },
-                .comment_start => .comment_start,
-                .comment_content => .{ .comment_content = .{
-                    .content = self.bufRange(self.scanner.token_data.comment_content.content),
-                    .final = self.scanner.token_data.comment_content.final,
-                } },
-                .pi_start => pi_start: {
+                .xml_declaration => {
+                    self.token_data = .{ .xml_declaration = .{
+                        .version = self.bufRange(self.scanner.token_data.xml_declaration.version),
+                        .encoding = if (self.scanner.token_data.xml_declaration.encoding) |enc| self.bufRange(enc) else null,
+                        .standalone = self.scanner.token_data.xml_declaration.standalone,
+                    } };
+                    if (self.token_data.xml_declaration.encoding) |declared_encoding| {
+                        try self.decoder.adaptTo(declared_encoding);
+                    }
+                    return .xml_declaration;
+                },
+                .element_start => {
+                    self.token_data = .{ .element_start = .{
+                        .name = self.bufRange(self.scanner.token_data.element_start.name),
+                    } };
+                    return .element_start;
+                },
+                .element_content => {
+                    self.token_data = .{ .element_content = .{
+                        .content = self.bufContent(self.scanner.token_data.element_content.content),
+                    } };
+                    return .element_content;
+                },
+                .element_end => {
+                    self.token_data = .{ .element_end = .{
+                        .name = self.bufRange(self.scanner.token_data.element_end.name),
+                    } };
+                    return .element_end;
+                },
+                .element_end_empty => {
+                    self.token_data = .{ .element_end_empty = {} };
+                    return .element_end_empty;
+                },
+                .attribute_start => {
+                    self.token_data = .{ .attribute_start = .{
+                        .name = self.bufRange(self.scanner.token_data.attribute_start.name),
+                    } };
+                    return .attribute_start;
+                },
+                .attribute_content => {
+                    self.token_data = .{ .attribute_content = .{
+                        .content = self.bufContent(self.scanner.token_data.attribute_content.content),
+                        .final = self.scanner.token_data.attribute_content.final,
+                    } };
+                    return .attribute_content;
+                },
+                .comment_start => {
+                    self.token_data = .{ .comment_start = {} };
+                    return .comment_start;
+                },
+                .comment_content => {
+                    self.token_data = .{ .comment_content = .{
+                        .content = self.bufRange(self.scanner.token_data.comment_content.content),
+                        .final = self.scanner.token_data.comment_content.final,
+                    } };
+                    return .comment_content;
+                },
+                .pi_start => {
                     const target = self.bufRange(self.scanner.token_data.pi_start.target);
                     if (std.ascii.eqlIgnoreCase(target, "xml")) {
                         return error.InvalidPiTarget;
                     }
-                    break :pi_start .{ .pi_start = .{
+                    self.token_data = .{ .pi_start = .{
                         .target = target,
                     } };
+                    return .pi_start;
                 },
-                .pi_content => .{ .pi_content = .{
-                    .content = self.bufRange(self.scanner.token_data.pi_content.content),
-                    .final = self.scanner.token_data.pi_content.final,
-                } },
-            };
-            if (buf_token == .xml_declaration) {
-                if (buf_token.xml_declaration.encoding) |declared_encoding| {
-                    try self.decoder.adaptTo(declared_encoding);
-                }
+                .pi_content => {
+                    self.token_data = .{ .pi_content = .{
+                        .content = self.bufRange(self.scanner.token_data.pi_content.content),
+                        .final = self.scanner.token_data.pi_content.final,
+                    } };
+                    return .pi_content;
+                },
             }
-            return buf_token;
         }
 
         inline fn bufContent(self: *const Self, content: Scanner.Token.Content) Token.Content {
@@ -505,16 +588,18 @@ test "PI target" {
     try testInvalid(.{}, "<root><?xml version='1.0'?></root>", error.InvalidPiTarget);
 }
 
-fn testValid(comptime options: TokenReaderOptions, input: []const u8, expected_tokens: []const Token) !void {
+fn testValid(comptime options: TokenReaderOptions, input: []const u8, expected_tokens: []const Token.Full) !void {
     var input_stream = std.io.fixedBufferStream(input);
     var input_reader = tokenReader(input_stream.reader(), options);
     var i: usize = 0;
-    while (try input_reader.next()) |token| : (i += 1) {
+    while (true) : (i += 1) {
+        const token = try input_reader.next();
+        if (token == .eof) break;
         if (i >= expected_tokens.len) {
             std.debug.print("Unexpected token after end: {}\n", .{token});
             return error.TestFailed;
         }
-        testing.expectEqualDeep(expected_tokens[i], token) catch |e| {
+        testing.expectEqualDeep(expected_tokens[i], input_reader.fullToken(token)) catch |e| {
             std.debug.print("(at index {})\n", .{i});
             return e;
         };
@@ -528,7 +613,9 @@ fn testValid(comptime options: TokenReaderOptions, input: []const u8, expected_t
 fn testInvalid(comptime options: TokenReaderOptions, input: []const u8, expected_error: anyerror) !void {
     var input_stream = std.io.fixedBufferStream(input);
     var input_reader = tokenReader(input_stream.reader(), options);
-    while (input_reader.next()) |_| {} else |err| {
+    while (input_reader.next()) |token| {
+        if (token == .eof) return error.TestExpectedError;
+    } else |err| {
         try testing.expectEqual(expected_error, err);
     }
 }

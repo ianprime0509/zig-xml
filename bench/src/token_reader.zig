@@ -8,5 +8,8 @@ pub fn runBench(data: []const u8) !void {
     var token_reader = xml.tokenReader(data_stream.reader(), .{
         .DecoderType = xml.encoding.Utf8Decoder,
     });
-    while (try token_reader.next()) |_| {}
+    while (true) {
+        const token = try token_reader.next();
+        if (token == .eof) break;
+    }
 }

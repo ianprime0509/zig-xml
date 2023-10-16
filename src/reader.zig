@@ -468,50 +468,52 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
             _ = self.event_arena.reset(.retain_capacity);
             const event_allocator = self.event_arena.allocator();
             while (true) {
-                const token = (try self.nextToken()) orelse return null;
-                switch (token) {
-                    .xml_declaration => |xml_declaration| return .{ .xml_declaration = .{
-                        .version = xml_declaration.version,
-                        .encoding = xml_declaration.encoding,
-                        .standalone = xml_declaration.standalone,
+                switch (try self.nextToken()) {
+                    .eof => return null,
+                    .xml_declaration => return .{ .xml_declaration = .{
+                        .version = self.token_reader.token_data.xml_declaration.version,
+                        .encoding = self.token_reader.token_data.xml_declaration.encoding,
+                        .standalone = self.token_reader.token_data.xml_declaration.standalone,
                     } },
-                    .element_start => |element_start| {
+                    .element_start => {
                         if (try self.finalizePendingEvent()) |event| {
-                            self.pending_token = token;
+                            self.pending_token = .element_start;
                             return event;
                         }
-                        const name = try self.allocator.dupe(u8, element_start.name);
+                        const name = try self.allocator.dupe(u8, self.token_reader.token_data.element_start.name);
                         errdefer self.allocator.free(name);
                         try self.element_names.append(self.allocator, name);
                         errdefer _ = self.element_names.pop();
                         try self.namespace_context.startScope(self.allocator);
                         self.pending_event = .{ .element_start = .{ .name = name } };
                     },
-                    .element_content => |element_content| {
+                    .element_content => {
                         if (try self.finalizePendingEvent()) |event| {
-                            self.pending_token = token;
+                            self.pending_token = .element_content;
                             return event;
                         }
-                        return .{ .element_content = .{ .content = try self.contentText(element_content.content) } };
+                        return .{ .element_content = .{
+                            .content = try self.contentText(self.token_reader.token_data.element_content.content),
+                        } };
                     },
-                    .element_end => |element_end| {
+                    .element_end => {
                         if (try self.finalizePendingEvent()) |event| {
-                            self.pending_token = token;
+                            self.pending_token = .element_end;
                             return event;
                         }
                         const expected_name = self.element_names.pop();
                         defer self.allocator.free(expected_name);
-                        if (!mem.eql(u8, expected_name, element_end.name)) {
+                        if (!mem.eql(u8, expected_name, self.token_reader.token_data.element_end.name)) {
                             return error.MismatchedEndTag;
                         }
-                        var qname = try self.namespace_context.parseName(element_end.name, true);
+                        var qname = try self.namespace_context.parseName(self.token_reader.token_data.element_end.name, true);
                         try qname.dupNs(event_allocator);
                         self.namespace_context.endScope(self.allocator);
                         return .{ .element_end = .{ .name = qname } };
                     },
                     .element_end_empty => {
                         if (try self.finalizePendingEvent()) |event| {
-                            self.pending_token = token;
+                            self.pending_token = .element_end_empty;
                             return event;
                         }
                         const name = self.element_names.pop();
@@ -522,8 +524,11 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
                         self.namespace_context.endScope(self.allocator);
                         return .{ .element_end = .{ .name = qname } };
                     },
-                    .attribute_start => |attribute_start| {
-                        var attr_entry = try self.pending_event.element_start.attributes.getOrPut(event_allocator, attribute_start.name);
+                    .attribute_start => {
+                        var attr_entry = try self.pending_event.element_start.attributes.getOrPut(
+                            event_allocator,
+                            self.token_reader.token_data.attribute_start.name,
+                        );
                         if (attr_entry.found_existing) {
                             return error.DuplicateAttribute;
                         }
@@ -531,42 +536,47 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
                         // the next token, so we have to duplicate it here.
                         // This doesn't change the hash of the key, so it's
                         // safe to do this.
-                        attr_entry.key_ptr.* = try event_allocator.dupe(u8, attribute_start.name);
+                        attr_entry.key_ptr.* = try event_allocator.dupe(u8, self.token_reader.token_data.attribute_start.name);
                         attr_entry.value_ptr.* = .{};
                     },
-                    .attribute_content => |attribute_content| {
+                    .attribute_content => {
                         const attributes = self.pending_event.element_start.attributes.values();
-                        try attributes[attributes.len - 1].appendSlice(event_allocator, try self.contentText(attribute_content.content));
+                        try attributes[attributes.len - 1].appendSlice(event_allocator, try self.contentText(self.token_reader.token_data.attribute_content.content));
                     },
                     .comment_start => {
                         if (try self.finalizePendingEvent()) |event| {
-                            self.pending_token = token;
+                            self.pending_token = .comment_start;
                             return event;
                         }
                         self.pending_event = .{ .comment = .{} };
                     },
-                    .comment_content => |comment_content| {
-                        try self.pending_event.comment.content.appendSlice(event_allocator, comment_content.content);
-                        if (comment_content.final) {
+                    .comment_content => {
+                        try self.pending_event.comment.content.appendSlice(event_allocator, self.token_reader.token_data.comment_content.content);
+                        if (self.token_reader.token_data.comment_content.final) {
                             const event = Event{ .comment = .{ .content = self.pending_event.comment.content.items } };
                             self.pending_event = .none;
                             return event;
                         }
                     },
-                    .pi_start => |pi_start| {
+                    .pi_start => {
                         if (try self.finalizePendingEvent()) |event| {
-                            self.pending_token = token;
+                            self.pending_token = .pi_start;
                             return event;
                         }
-                        if (options.namespace_aware and mem.indexOfScalar(u8, pi_start.target, ':') != null) {
+                        if (options.namespace_aware and mem.indexOfScalar(u8, self.token_reader.token_data.pi_start.target, ':') != null) {
                             return error.QNameNotAllowed;
                         }
-                        self.pending_event = .{ .pi = .{ .target = try event_allocator.dupe(u8, pi_start.target) } };
+                        self.pending_event = .{ .pi = .{
+                            .target = try event_allocator.dupe(u8, self.token_reader.token_data.pi_start.target),
+                        } };
                     },
-                    .pi_content => |pi_content| {
-                        try self.pending_event.pi.content.appendSlice(event_allocator, pi_content.content);
-                        if (pi_content.final) {
-                            const event = Event{ .pi = .{ .target = self.pending_event.pi.target, .content = self.pending_event.pi.content.items } };
+                    .pi_content => {
+                        try self.pending_event.pi.content.appendSlice(event_allocator, self.token_reader.token_data.pi_content.content);
+                        if (self.token_reader.token_data.pi_content.final) {
+                            const event = Event{ .pi = .{
+                                .target = self.pending_event.pi.target,
+                                .content = self.pending_event.pi.content.items,
+                            } };
                             self.pending_event = .none;
                             return event;
                         }
@@ -575,7 +585,7 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
             }
         }
 
-        fn nextToken(self: *Self) !?Token {
+        fn nextToken(self: *Self) !Token {
             if (self.pending_token) |token| {
                 self.pending_token = null;
                 return token;

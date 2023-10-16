@@ -41,7 +41,7 @@
 //! - Not extensively tested/fuzzed.
 
 /// The data for the most recently returned token.
-token_data: Token.Data = .{ .ok = {} },
+token_data: Token.Data = undefined,
 /// The current state of the scanner.
 state: State = .start,
 /// Data associated with the current state of the scanner.
@@ -97,7 +97,7 @@ pub const Range = struct {
 ///   content or there are other necessary intervening factors, such as CDATA
 ///   in the middle of normal (non-CDATA) element content.
 ///
-/// For efficiency (avoiding copying when passing around tokens), `Token` is
+/// For efficiency (avoiding copying when passing around tokens), this is
 /// merely an enum specifying the token type. The actual token data is available
 /// in `Token.Data`, in the scanner's `token_data` field. The `fullToken`
 /// function can be used to get a `Token.Full`, which is a tagged union type and
