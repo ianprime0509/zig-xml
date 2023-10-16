@@ -166,6 +166,7 @@ pub const NamespaceContext = struct {
         InvalidNsBinding,
         InvalidQName,
         UndeclaredNsPrefix,
+        QNameNotAllowed,
     };
 
     pub fn deinit(self: *NamespaceContext, allocator: Allocator) void {
@@ -440,7 +441,6 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
             DuplicateAttribute,
             MismatchedEndTag,
             UndeclaredEntityReference,
-            QNameNotAllowed,
         } || Allocator.Error || TokenReaderType.Error || NamespaceContextType.Error;
 
         pub fn init(allocator: Allocator, r: ReaderType, decoder: options.DecoderType) Self {
