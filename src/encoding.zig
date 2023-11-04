@@ -54,11 +54,11 @@ pub const DefaultDecoder = struct {
     state: union(enum) {
         start,
         utf8: Utf8Decoder,
-        utf16_le: Utf16Decoder(.Little),
-        utf16_be: Utf16Decoder(.Big),
+        utf16_le: Utf16Decoder(.little),
+        utf16_be: Utf16Decoder(.big),
     } = .start,
 
-    pub const Error = Utf8Decoder.Error || Utf16Decoder(.Little).Error || Utf16Decoder(.Big).Error;
+    pub const Error = Utf8Decoder.Error || Utf16Decoder(.little).Error || Utf16Decoder(.big).Error;
 
     pub const max_encoded_codepoint_len = 4;
     const bom = 0xFEFF;
@@ -373,8 +373,8 @@ pub fn Utf16Decoder(comptime endian: std.builtin.Endian) type {
 
         pub fn adaptTo(_: *Self, encoding: []const u8) error{InvalidEncoding}!void {
             if (!(ascii.eqlIgnoreCase(encoding, "utf-16") or
-                (endian == .Big and ascii.eqlIgnoreCase(encoding, "utf-16be")) or
-                (endian == .Little and ascii.eqlIgnoreCase(encoding, "utf-16le"))))
+                (endian == .big and ascii.eqlIgnoreCase(encoding, "utf-16be")) or
+                (endian == .little and ascii.eqlIgnoreCase(encoding, "utf-16le"))))
             {
                 return error.InvalidEncoding;
             }
@@ -394,7 +394,7 @@ test Utf16Decoder {
             "\x00\xD8\x00\x00" ++ // unpaired high surrogate followed by U+0000
             "\xFF\xDF" // unpaired low surrogate
         ;
-        _ = try testDecode(Utf16Decoder(.Little), input, &.{
+        _ = try testDecode(Utf16Decoder(.little), input, &.{
             '\x00',
             'A',
             'b',
@@ -417,7 +417,7 @@ test Utf16Decoder {
             "\xD8\x00\x00\x00" ++ // unpaired high surrogate followed by U+0000
             "\xDF\xFF" // unpaired low surrogate
         ;
-        _ = try testDecode(Utf16Decoder(.Big), input, &.{
+        _ = try testDecode(Utf16Decoder(.big), input, &.{
             '\x00',
             'A',
             'b',
