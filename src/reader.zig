@@ -525,7 +525,7 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
                         return .{ .element_end = .{ .name = qname } };
                     },
                     .attribute_start => {
-                        var attr_entry = try self.pending_event.element_start.attributes.getOrPut(
+                        const attr_entry = try self.pending_event.element_start.attributes.getOrPut(
                             event_allocator,
                             self.token_reader.token_data.attribute_start.name,
                         );
@@ -621,7 +621,7 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
                         const attr_qname = try self.namespace_context.parseName(attr_name, false);
                         attributes.appendAssumeCapacity(.{ .name = attr_qname, .value = attr_value.items });
                         if (options.namespace_aware) {
-                            var entry = attr_qnames.getOrPutAssumeCapacity(attr_qname);
+                            const entry = attr_qnames.getOrPutAssumeCapacity(attr_qname);
                             if (entry.found_existing) {
                                 return error.DuplicateAttribute;
                             }
@@ -1032,7 +1032,7 @@ test "nextNode namespace handling" {
     var input_reader = reader(testing.allocator, input_stream.reader(), .{});
     defer input_reader.deinit();
 
-    var root_start = try input_reader.next();
+    const root_start = try input_reader.next();
     try testing.expect(root_start != null and root_start.? == .element_start);
     var root_node = try input_reader.nextNode(testing.allocator, root_start.?.element_start);
     defer root_node.deinit();
