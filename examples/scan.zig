@@ -21,7 +21,7 @@ pub fn main() !void {
     const input_file = try std.fs.cwd().openFile(input_path, .{});
     defer input_file.close();
     var input_buffered_reader = std.io.bufferedReader(input_file.reader());
-    var input_reader = input_buffered_reader.reader();
+    const input_reader = input_buffered_reader.reader();
     var scanner = xml.Scanner{};
     var decoder = xml.encoding.DefaultDecoder{};
 
