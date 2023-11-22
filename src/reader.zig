@@ -313,7 +313,6 @@ pub fn reader(
 pub fn readDocument(
     allocator: Allocator,
     r: anytype,
-    decoder: anytype,
     comptime options: ReaderOptions,
 ) !OwnedValue(Node.Document) {
     var arena = ArenaAllocator.init(allocator);
@@ -325,7 +324,7 @@ pub fn readDocument(
     var decl_standalone: ?bool = null;
     var children = ArrayListUnmanaged(Node){};
 
-    var xml_reader = reader(allocator, r, decoder, options);
+    var xml_reader = reader(allocator, r, options);
     defer xml_reader.deinit();
     while (try xml_reader.next()) |event| {
         switch (event) {
@@ -959,9 +958,6 @@ fn testInvalid(comptime options: ReaderOptions, input: []const u8, expected_erro
 }
 
 test "nextNode" {
-    // See https://github.com/ziglang/zig/pull/14981
-    if (true) return error.SkipZigTest;
-
     var input_stream = std.io.fixedBufferStream(
         \\<?xml version="1.0"?>
         \\<?some-pi?>
@@ -1017,9 +1013,6 @@ test "nextNode" {
 }
 
 test "nextNode namespace handling" {
-    // See https://github.com/ziglang/zig/pull/14981
-    if (true) return error.SkipZigTest;
-
     var input_stream = std.io.fixedBufferStream(
         \\<a:root xmlns:a="urn:1">
         \\  <child xmlns="urn:2" xmlns:b="urn:3" attr="value">
@@ -1058,9 +1051,6 @@ test "nextNode namespace handling" {
 }
 
 test readDocument {
-    // See https://github.com/ziglang/zig/pull/14981
-    if (true) return error.SkipZigTest;
-
     var input_stream = std.io.fixedBufferStream(
         \\<?xml version="1.0"?>
         \\<?some-pi?>
