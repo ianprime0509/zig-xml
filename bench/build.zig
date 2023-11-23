@@ -22,30 +22,35 @@ pub fn build(b: *Build) !void {
         .iconv = false,
         .lzma = false,
         .zlib = false,
-    }).artifact("xml2");
+    });
     const bench_libxml2 = addBench(b, "libxml2");
-    bench_libxml2.linkLibrary(libxml2);
+    bench_libxml2.linkLibrary(libxml2.artifact("xml2"));
 
+    const yxml = b.dependency("yxml", .{});
     const bench_yxml = addBench(b, "yxml");
     bench_yxml.linkLibC();
-    bench_yxml.addCSourceFile(.{ .file = .{ .path = "lib/yxml/yxml.c" }, .flags = &.{} });
-    bench_yxml.addIncludePath(.{ .path = "lib/yxml" });
+    bench_yxml.addCSourceFile(.{ .file = yxml.path("yxml.c"), .flags = &.{} });
+    bench_yxml.addIncludePath(yxml.path("."));
 
+    const mxml = b.dependency("mxml", .{});
     const bench_mxml = addBench(b, "mxml");
     bench_mxml.linkLibC();
-    bench_mxml.addCSourceFiles(.{ .files = &.{
-        "lib/mxml/mxml-attr.c",
-        "lib/mxml/mxml-entity.c",
-        "lib/mxml/mxml-file.c",
-        "lib/mxml/mxml-get.c",
-        "lib/mxml/mxml-index.c",
-        "lib/mxml/mxml-node.c",
-        "lib/mxml/mxml-private.c",
-        "lib/mxml/mxml-search.c",
-        "lib/mxml/mxml-set.c",
-        "lib/mxml/mxml-string.c",
-    } });
-    bench_mxml.addIncludePath(.{ .path = "lib/mxml" });
+    bench_mxml.addCSourceFiles(.{
+        .dependency = mxml,
+        .files = &.{
+            "mxml-attr.c",
+            "mxml-entity.c",
+            "mxml-file.c",
+            "mxml-get.c",
+            "mxml-index.c",
+            "mxml-node.c",
+            "mxml-private.c",
+            "mxml-search.c",
+            "mxml-set.c",
+            "mxml-string.c",
+        },
+    });
+    bench_mxml.addIncludePath(mxml.path("."));
     bench_mxml.addIncludePath(.{ .path = "lib/mxml-config" });
 }
 

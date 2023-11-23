@@ -16,5 +16,15 @@
             .url = "git+https://github.com/ianprime0509/zig-build-libxml2#update-zig",
             .hash = "1220c48add849a9e9fa9c9b84e0c37b5843f7cefb45a98dab57a08daa772d273f810",
         },
+        .mxml = .{
+            .url = "git+https://github.com/michaelrsweet/mxml.git#809204a3051607f54b57e2950f3a5520d79ae383",
+            .hash = "12203c3b2dbaf60323c904c186d164c9e80343f61dc112f60da9b05400a2deca0ad0",
+        },
+        .yxml = .{
+            // Upstream: https://g.blicky.net/yxml.git/
+            // Upstream doesn't support Git protocol v2, so Zig cannot currently fetch it
+            .url = "git+https://github.com/ianprime0509/yxml.git#66507906673bc6159d5d620414479954c9c21c24",
+            .hash = "1220bb6cf028997259ad3cc950810c5ead0bc0d5cde66915c37e88df613b93ffc4c7",
+        },
     },
 }
