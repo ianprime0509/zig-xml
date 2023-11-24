@@ -199,6 +199,8 @@ Benchmark 6 (196 runs): zig-out/bin/yxml Gtk-4.0.gir
 
 ## License
 
-zig-xml is free and open source software, released under the
-[MIT license](https://opensource.org/license/MIT/) as found in the `LICENSE`
-file of this repository.
+zig-xml is free software, released under the [Zero Clause BSD
+License](https://spdx.org/licenses/0BSD.html), as found in the `LICENSE` file of
+this repository. This license places no restrictions on your use, modification,
+or redistribution of the library: providing attribution is appreciated, but not
+required.
