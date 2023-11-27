@@ -51,7 +51,19 @@ pub fn build(b: *Build) !void {
         },
     });
     bench_mxml.addIncludePath(mxml.path("."));
-    bench_mxml.addIncludePath(.{ .path = "lib/mxml-config" });
+    const mxml_config = b.addConfigHeader(.{
+        .style = .{ .autoconf = mxml.path("config.h.in") },
+    }, .{
+        .HAVE_LONG_LONG_INT = 1,
+        .HAVE_SNPRINTF = 1,
+        .HAVE_VASPRINTF = null,
+        .HAVE_VSNPRINTF = null,
+        .HAVE_STRDUP = null,
+        .HAVE_STRLCAT = null,
+        .HAVE_STRLCPY = null,
+        .HAVE_PTHREAD_H = null,
+    });
+    bench_mxml.addConfigHeader(mxml_config);
 }
 
 fn addBench(b: *Build, name: []const u8) *Step.Compile {
