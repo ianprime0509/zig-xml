@@ -6,15 +6,15 @@ pub fn build(b: *Build) !void {
     const xml = b.dependency("xml", .{}).module("xml");
 
     const bench_scanner = addBench(b, "scanner");
-    bench_scanner.addModule("xml", xml);
+    bench_scanner.root_module.addImport("xml", xml);
     bench_scanner.linkLibC();
 
     const bench_token_reader = addBench(b, "token_reader");
-    bench_token_reader.addModule("xml", xml);
+    bench_token_reader.root_module.addImport("xml", xml);
     bench_token_reader.linkLibC();
 
     const bench_reader = addBench(b, "reader");
-    bench_reader.addModule("xml", xml);
+    bench_reader.root_module.addImport("xml", xml);
     bench_reader.linkLibC();
 
     const libxml2 = b.dependency("libxml2", .{
@@ -70,6 +70,7 @@ fn addBench(b: *Build, name: []const u8) *Step.Compile {
     const exe = b.addExecutable(.{
         .name = name,
         .root_source_file = .{ .path = b.fmt("src/{s}.zig", .{name}) },
+        .target = b.host,
         .optimize = .ReleaseFast,
     });
     b.installArtifact(exe);
