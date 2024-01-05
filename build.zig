@@ -1,13 +1,14 @@
 const std = @import("std");
 const Build = std.Build;
-const CrossTarget = std.zig.CrossTarget;
 const Mode = std.builtin.Mode;
 
 pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const xml = b.addModule("xml", .{ .source_file = .{ .path = "src/xml.zig" } });
+    const xml = b.addModule("xml", .{
+        .root_source_file = .{ .path = "src/xml.zig" },
+    });
 
     addTests(b, target, optimize, xml);
     addDocs(b, target);
@@ -15,7 +16,7 @@ pub fn build(b: *Build) void {
     addFuzz(b, target, xml);
 }
 
-fn addTests(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Module) void {
+fn addTests(b: *Build, target: Build.ResolvedTarget, optimize: Mode, xml: *Build.Module) void {
     const main_tests = b.addTest(.{
         .root_source_file = .{ .path = "src/xml.zig" },
         .target = target,
@@ -33,7 +34,7 @@ fn addTests(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Module) 
         .target = target,
         .optimize = optimize,
     });
-    xmlconf_exe.addModule("xml", xml);
+    xmlconf_exe.root_module.addImport("xml", xml);
 
     const install_xmlconf_step = b.step("install-xmlconf", "Install xmlconf test runner");
     install_xmlconf_step.dependOn(&b.addInstallArtifact(xmlconf_exe, .{}).step);
@@ -68,7 +69,7 @@ fn addTests(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Module) 
     run_xmlconf_step.dependOn(&run_xmlconf_exe.step);
 }
 
-fn addDocs(b: *Build, target: CrossTarget) void {
+fn addDocs(b: *Build, target: Build.ResolvedTarget) void {
     const obj = b.addObject(.{
         .name = "zig-xml",
         .root_source_file = .{ .path = "src/xml.zig" },
@@ -87,7 +88,7 @@ fn addDocs(b: *Build, target: CrossTarget) void {
     docs_step.dependOn(&install_docs.step);
 }
 
-fn addExamples(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Module) void {
+fn addExamples(b: *Build, target: Build.ResolvedTarget, optimize: Mode, xml: *Build.Module) void {
     const install_examples_step = b.step("install-examples", "Install examples");
 
     const scan_exe = b.addExecutable(.{
@@ -96,7 +97,7 @@ fn addExamples(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Modul
         .target = target,
         .optimize = optimize,
     });
-    scan_exe.addModule("xml", xml);
+    scan_exe.root_module.addImport("xml", xml);
     install_examples_step.dependOn(&b.addInstallArtifact(scan_exe, .{}).step);
 
     const run_scan_exe = b.addRunArtifact(scan_exe);
@@ -113,7 +114,7 @@ fn addExamples(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Modul
         .target = target,
         .optimize = optimize,
     });
-    read_exe.addModule("xml", xml);
+    read_exe.root_module.addImport("xml", xml);
     install_examples_step.dependOn(&b.addInstallArtifact(read_exe, .{}).step);
 
     const run_read_exe = b.addRunArtifact(read_exe);
@@ -125,7 +126,7 @@ fn addExamples(b: *Build, target: CrossTarget, optimize: Mode, xml: *Build.Modul
     run_read_step.dependOn(&run_read_exe.step);
 }
 
-fn addFuzz(b: *Build, target: CrossTarget, xml: *Build.Module) void {
+fn addFuzz(b: *Build, target: Build.ResolvedTarget, xml: *Build.Module) void {
     // Thanks to https://www.ryanliptak.com/blog/fuzzing-zig-code/ for the basis of this!
     const fuzz_lib = b.addStaticLibrary(.{
         .name = "fuzz",
@@ -135,7 +136,7 @@ fn addFuzz(b: *Build, target: CrossTarget, xml: *Build.Module) void {
     });
     fuzz_lib.want_lto = true;
     fuzz_lib.bundle_compiler_rt = true;
-    fuzz_lib.addModule("xml", xml);
+    fuzz_lib.root_module.addImport("xml", xml);
 
     const fuzz_compile = b.addSystemCommand(&.{ "afl-clang-lto", "-o" });
     const fuzz_exe = fuzz_compile.addOutputFileArg("fuzz");
@@ -157,7 +158,7 @@ fn addFuzz(b: *Build, target: CrossTarget, xml: *Build.Module) void {
     for (dictionaries) |dictionary| {
         run_fuzz.addArgs(&.{ "-x", b.pathJoin(&.{ "fuzz", "dictionaries", dictionary }) });
     }
-    run_fuzz.addFileSourceArg(fuzz_exe);
+    run_fuzz.addFileArg(fuzz_exe);
     const run_fuzz_step = b.step("fuzz", "Execute afl-fuzz with the fuzz testing executable");
     run_fuzz_step.dependOn(&run_fuzz.step);
 
@@ -167,7 +168,7 @@ fn addFuzz(b: *Build, target: CrossTarget, xml: *Build.Module) void {
         .target = target,
         .optimize = .Debug,
     });
-    fuzz_reproduce_exe.addModule("xml", xml);
+    fuzz_reproduce_exe.root_module.addImport("xml", xml);
 
     const run_fuzz_reproduce_exe = b.addRunArtifact(fuzz_reproduce_exe);
     if (b.args) |args| {
