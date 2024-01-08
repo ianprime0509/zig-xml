@@ -364,12 +364,6 @@ pub fn readDocument(
 pub const ReaderOptions = struct {
     /// The type of decoder to use.
     DecoderType: type = encoding.DefaultDecoder,
-    /// The size of the internal buffer.
-    ///
-    /// This limits the byte length of "non-splittable" content, such as
-    /// element and attribute names. Longer such content will result in
-    /// `error.Overflow`.
-    buffer_size: usize = 4096,
     /// Whether to normalize line endings and attribute values according to the
     /// XML specification.
     ///
@@ -425,12 +419,10 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
         /// An arena to store memory for `pending_event` (and the event after
         /// it's returned).
         event_arena: ArenaAllocator,
-        allocator: Allocator,
 
         const Self = @This();
         const TokenReaderType = TokenReader(ReaderType, .{
             .DecoderType = options.DecoderType,
-            .buffer_size = options.buffer_size,
             .enable_normalization = options.enable_normalization,
             .track_location = options.track_location,
         });
@@ -444,19 +436,19 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
 
         pub fn init(allocator: Allocator, r: ReaderType, decoder: options.DecoderType) Self {
             return .{
-                .token_reader = TokenReaderType.init(r, decoder),
+                .token_reader = TokenReaderType.init(allocator, r, decoder),
                 .event_arena = ArenaAllocator.init(allocator),
-                .allocator = allocator,
             };
         }
 
         pub fn deinit(self: *Self) void {
             for (self.element_names.items) |name| {
-                self.allocator.free(name);
+                self.token_reader.allocator.free(name);
             }
-            self.element_names.deinit(self.allocator);
-            self.namespace_context.deinit(self.allocator);
+            self.element_names.deinit(self.token_reader.allocator);
+            self.namespace_context.deinit(self.token_reader.allocator);
             self.event_arena.deinit();
+            self.token_reader.deinit();
             self.* = undefined;
         }
 
@@ -479,11 +471,11 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
                             self.pending_token = .element_start;
                             return event;
                         }
-                        const name = try self.allocator.dupe(u8, self.token_reader.token_data.element_start.name);
-                        errdefer self.allocator.free(name);
-                        try self.element_names.append(self.allocator, name);
+                        const name = try self.token_reader.allocator.dupe(u8, self.token_reader.token_data.element_start.name);
+                        errdefer self.token_reader.allocator.free(name);
+                        try self.element_names.append(self.token_reader.allocator, name);
                         errdefer _ = self.element_names.pop();
-                        try self.namespace_context.startScope(self.allocator);
+                        try self.namespace_context.startScope(self.token_reader.allocator);
                         self.pending_event = .{ .element_start = .{ .name = name } };
                     },
                     .element_content => {
@@ -501,13 +493,13 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
                             return event;
                         }
                         const expected_name = self.element_names.pop();
-                        defer self.allocator.free(expected_name);
+                        defer self.token_reader.allocator.free(expected_name);
                         if (!mem.eql(u8, expected_name, self.token_reader.token_data.element_end.name)) {
                             return error.MismatchedEndTag;
                         }
                         var qname = try self.namespace_context.parseName(self.token_reader.token_data.element_end.name, true);
                         try qname.dupNs(event_allocator);
-                        self.namespace_context.endScope(self.allocator);
+                        self.namespace_context.endScope(self.token_reader.allocator);
                         return .{ .element_end = .{ .name = qname } };
                     },
                     .element_end_empty => {
@@ -516,11 +508,11 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
                             return event;
                         }
                         const name = self.element_names.pop();
-                        defer self.allocator.free(name);
+                        defer self.token_reader.allocator.free(name);
                         const dup_name = try event_allocator.dupe(u8, name);
                         var qname = try self.namespace_context.parseName(dup_name, true);
                         try qname.dupNs(event_allocator);
-                        self.namespace_context.endScope(self.allocator);
+                        self.namespace_context.endScope(self.token_reader.allocator);
                         return .{ .element_end = .{ .name = qname } };
                     },
                     .attribute_start => {
@@ -589,6 +581,7 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
                 self.pending_token = null;
                 return token;
             }
+            self.token_reader.resetBuffer() catch {};
             return try self.token_reader.next();
         }
 
@@ -600,9 +593,9 @@ pub fn Reader(comptime ReaderType: type, comptime options: ReaderOptions) type {
                     // Bind all xmlns declarations in the current element
                     for (element_start.attributes.keys(), element_start.attributes.values()) |attr_name, attr_value| {
                         if (mem.eql(u8, attr_name, "xmlns")) {
-                            try self.namespace_context.bindDefault(self.allocator, attr_value.items);
+                            try self.namespace_context.bindDefault(self.token_reader.allocator, attr_value.items);
                         } else if (mem.startsWith(u8, attr_name, "xmlns:")) {
-                            try self.namespace_context.bindPrefix(self.allocator, attr_name["xmlns:".len..], attr_value.items);
+                            try self.namespace_context.bindPrefix(self.token_reader.allocator, attr_name["xmlns:".len..], attr_value.items);
                         }
                     }
 
