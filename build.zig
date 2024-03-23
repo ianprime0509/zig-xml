@@ -71,7 +71,7 @@ fn addTests(b: *Build, target: Build.ResolvedTarget, optimize: Mode, xml: *Build
 
 fn addDocs(b: *Build, target: Build.ResolvedTarget) void {
     const obj = b.addObject(.{
-        .name = "zig-xml",
+        .name = "xml",
         .root_source_file = .{ .path = "src/xml.zig" },
         .target = target,
         .optimize = .Debug,
