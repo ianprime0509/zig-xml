@@ -12,9 +12,8 @@
             .path = "..",
         },
         .libxml2 = .{
-            // https://github.com/mitchellh/zig-build-libxml2/pull/1
-            .url = "git+https://github.com/ianprime0509/zig-build-libxml2#4d1b7db156b0e7a19127c652adefdf27799770ab",
-            .hash = "122011b13203141cc965cfe6b070ffb5a8835eb906bb2cfd4650dbc17574e6e36fd5",
+            .url = "git+https://github.com/ianprime0509/zig-libxml2#4c370e70136fb96f227b95b30a4c1f5ec4dc013c",
+            .hash = "1220869e0007bf4a7fe10d86ccb24a6bf09d32714d6432d2cc6e5b2a7be0ad55e3b7",
         },
         .mxml = .{
             .url = "git+https://github.com/michaelrsweet/mxml.git#809204a3051607f54b57e2950f3a5520d79ae383",

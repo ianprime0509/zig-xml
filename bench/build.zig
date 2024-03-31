@@ -19,9 +19,6 @@ pub fn build(b: *Build) !void {
 
     const libxml2 = b.dependency("libxml2", .{
         .optimize = .ReleaseFast,
-        .iconv = false,
-        .lzma = false,
-        .zlib = false,
     });
     const bench_libxml2 = addBench(b, "libxml2");
     bench_libxml2.linkLibrary(libxml2.artifact("xml2"));
@@ -36,7 +33,7 @@ pub fn build(b: *Build) !void {
     const bench_mxml = addBench(b, "mxml");
     bench_mxml.linkLibC();
     bench_mxml.addCSourceFiles(.{
-        .dependency = mxml,
+        .root = mxml.path("."),
         .files = &.{
             "mxml-attr.c",
             "mxml-entity.c",
