@@ -1,12 +1,7 @@
 # zig-xml
 
-zig-xml is an XML library for Zig.
-
-**Warning:** this library is still in early development. It has been reasonably
-well-tested at this point, but it is lacking some important features, and its
-performance is not ideal. If you need a stable and well-tested XML library,
-[zig-libxml2](https://github.com/mitchellh/zig-libxml2) is probably your best
-bet (build setup for the popular libxml2 C library).
+zig-xml is an XML library for Zig, currently supporting Zig 0.12.0 and the
+latest master at the time of writing.
 
 See the documentation in the code for more information about the available APIs
 (start in `xml.zig`). Autodocs are also published to GitHub Pages:
