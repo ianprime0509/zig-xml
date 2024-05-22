@@ -7,7 +7,7 @@ pub fn build(b: *Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const xml = b.addModule("xml", .{
-        .root_source_file = .{ .path = "src/xml.zig" },
+        .root_source_file = b.path("src/xml.zig"),
     });
 
     addTests(b, target, optimize, xml);
@@ -18,7 +18,7 @@ pub fn build(b: *Build) void {
 
 fn addTests(b: *Build, target: Build.ResolvedTarget, optimize: Mode, xml: *Build.Module) void {
     const main_tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/xml.zig" },
+        .root_source_file = b.path("src/xml.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -30,7 +30,7 @@ fn addTests(b: *Build, target: Build.ResolvedTarget, optimize: Mode, xml: *Build
 
     const xmlconf_exe = b.addExecutable(.{
         .name = "xmlconf",
-        .root_source_file = .{ .path = "test/xmlconf.zig" },
+        .root_source_file = b.path("test/xmlconf.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -72,7 +72,7 @@ fn addTests(b: *Build, target: Build.ResolvedTarget, optimize: Mode, xml: *Build
 fn addDocs(b: *Build, target: Build.ResolvedTarget) void {
     const obj = b.addObject(.{
         .name = "xml",
-        .root_source_file = .{ .path = "src/xml.zig" },
+        .root_source_file = b.path("src/xml.zig"),
         .target = target,
         .optimize = .Debug,
     });
@@ -93,7 +93,7 @@ fn addExamples(b: *Build, target: Build.ResolvedTarget, optimize: Mode, xml: *Bu
 
     const scan_exe = b.addExecutable(.{
         .name = "scan",
-        .root_source_file = .{ .path = "examples/scan.zig" },
+        .root_source_file = b.path("examples/scan.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -110,7 +110,7 @@ fn addExamples(b: *Build, target: Build.ResolvedTarget, optimize: Mode, xml: *Bu
 
     const read_exe = b.addExecutable(.{
         .name = "read",
-        .root_source_file = .{ .path = "examples/read.zig" },
+        .root_source_file = b.path("examples/read.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -130,7 +130,7 @@ fn addFuzz(b: *Build, target: Build.ResolvedTarget, xml: *Build.Module) void {
     // Thanks to https://www.ryanliptak.com/blog/fuzzing-zig-code/ for the basis of this!
     const fuzz_lib = b.addStaticLibrary(.{
         .name = "fuzz",
-        .root_source_file = .{ .path = "fuzz/main.zig" },
+        .root_source_file = b.path("fuzz/main.zig"),
         .target = target,
         .optimize = .Debug,
     });
@@ -164,7 +164,7 @@ fn addFuzz(b: *Build, target: Build.ResolvedTarget, xml: *Build.Module) void {
 
     const fuzz_reproduce_exe = b.addExecutable(.{
         .name = "fuzz-reproduce",
-        .root_source_file = .{ .path = "fuzz/main.zig" },
+        .root_source_file = b.path("fuzz/main.zig"),
         .target = target,
         .optimize = .Debug,
     });
