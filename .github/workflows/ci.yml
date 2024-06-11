@@ -19,7 +19,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
       - name: Set up Zig
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v1
         with:
           version: ${{ matrix.zig-version }}
       - name: Test
@@ -34,7 +34,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
       - name: Set up Zig
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v1
       - name: Build docs
         if: github.ref == 'refs/heads/main'
         run: zig build docs
