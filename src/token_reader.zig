@@ -1,5 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
+const Allocator = mem.Allocator;
+const assert = std.debug.assert;
 const testing = std.testing;
 const unicode = std.unicode;
 const encoding = @import("encoding.zig");
@@ -200,22 +202,24 @@ pub const NoOpLocation = struct {
 /// Wraps a `std.io.Reader` in a `TokenReader` with the default buffer size
 /// (4096).
 pub fn tokenReader(
+    allocator: Allocator,
     reader: anytype,
     comptime options: TokenReaderOptions,
 ) TokenReader(@TypeOf(reader), options) {
-    return TokenReader(@TypeOf(reader), options).init(reader, .{});
+    return TokenReader(@TypeOf(reader), options).init(allocator, reader, .{});
 }
 
 /// Options for a `TokenReader`.
 pub const TokenReaderOptions = struct {
     /// The type of decoder to use.
     DecoderType: type = encoding.DefaultDecoder,
-    /// The size of the internal buffer.
+    /// An optional maximum size for content tokens.
     ///
-    /// This limits the byte length of "non-splittable" content, such as
-    /// element and attribute names. Longer such content will result in
-    /// `error.Overflow`.
-    buffer_size: usize = 4096,
+    /// If non-null, once the token reader's buffer matches or exceeds this
+    /// size, it will attempt to return a token. This ensures memory usage
+    /// is bounded even if there are long runs of continuous content which
+    /// would otherwise result in a very large token.
+    content_token_size: ?usize = null,
     /// Whether to normalize line endings and attribute values according to the
     /// XML specification.
     ///
@@ -261,29 +265,35 @@ pub fn TokenReader(comptime ReaderType: type, comptime options: TokenReaderOptio
         ///
         /// Events may reference this buffer via slices. The contents of the
         /// buffer (up until `scanner.pos`) are always valid UTF-8.
-        buffer: [options.buffer_size]u8 = undefined,
+        buffer: std.ArrayListUnmanaged(u8) = .{},
         /// Whether the last codepoint read was a carriage return (`\r`).
         ///
         /// This is relevant for line break normalization.
         after_cr: if (options.enable_normalization) bool else void = if (options.enable_normalization) false,
+        allocator: Allocator,
 
         const Self = @This();
 
         pub const Error = error{
             InvalidEncoding,
             InvalidPiTarget,
-            Overflow,
             UnexpectedEndOfInput,
-        } || ReaderType.Error || options.DecoderType.Error || Scanner.Error;
+        } || Allocator.Error || ReaderType.Error || options.DecoderType.Error || Scanner.Error;
 
-        const max_encoded_codepoint_len = @max(options.DecoderType.max_encoded_codepoint_len, 4);
+        const max_encoded_codepoint_len = options.DecoderType.max_encoded_codepoint_len;
 
-        pub fn init(reader: ReaderType, decoder: options.DecoderType) Self {
+        pub fn init(allocator: Allocator, reader: ReaderType, decoder: options.DecoderType) Self {
             return .{
                 .scanner = Scanner{},
                 .reader = reader,
                 .decoder = decoder,
+                .allocator = allocator,
             };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.buffer.deinit(self.allocator);
+            self.* = undefined;
         }
 
         /// Returns the full token (including data) from the most recent call to
@@ -297,35 +307,25 @@ pub fn TokenReader(comptime ReaderType: type, comptime options: TokenReaderOptio
 
         /// Returns the next token from the input.
         ///
-        /// The slices in the `token_data` stored during this call are only
-        /// valid until the next call to `next`.
+        /// The slices in the `token_data` stored during this call are valid
+        /// until the next call to `resetBuffer`.
         pub fn next(self: *Self) Error!Token {
-            if (self.scanner.pos > 0) {
-                // If the scanner position is > 0, that means we emitted an event
-                // on the last call to next, and should try to reset the
-                // position again in an effort to not run out of buffer space
-                // (ideally, the scanner should be resettable after every token,
-                // but we do not depend on this).
-                if (self.scanner.resetPos()) |token| {
-                    if (token != .ok) {
-                        return try self.bufToken(token);
-                    }
-                } else |_| {
-                    // Failure to reset isn't fatal (yet); we can still try to
-                    // complete the token below
-                }
-            }
-
             while (true) {
-                if (self.scanner.pos + max_encoded_codepoint_len >= self.buffer.len) {
-                    if (self.scanner.resetPos()) |token| {
-                        if (token != .ok) {
-                            return try self.bufToken(token);
+                if (options.content_token_size) |content_token_size| {
+                    if (self.buffer.items.len >= content_token_size) {
+                        if (self.scanner.resetPos()) |token| {
+                            if (token == .ok) {
+                                // We still need to read more input to get to
+                                // the next token, but we can clear out the
+                                // buffer since none of the current contents
+                                // matter
+                                self.buffer.clearRetainingCapacity();
+                            } else {
+                                return self.bufToken(token);
+                            }
+                        } else |_| {
+                            // Not fatal; we might run out of memory soon
                         }
-                    } else |_| {
-                        // Failure to reset here still isn't fatal, since we
-                        // may end up getting shorter codepoints which manage
-                        // to complete the current token.
                     }
                 }
 
@@ -340,6 +340,17 @@ pub fn TokenReader(comptime ReaderType: type, comptime options: TokenReaderOptio
                     return try self.bufToken(token);
                 }
             }
+        }
+
+        /// Attempts to reset the internal buffer, while retaining any allocated
+        /// capacity. This invalidates the memory backing any tokens previously
+        /// returned by `next`.
+        pub fn resetBuffer(self: *Self) error{CannotReset}!void {
+            const unread_token = try self.scanner.resetPos();
+            // We haven't provided any new input to the scanner after emitting a
+            // token, so there cannot be a partial token returned here
+            assert(unread_token == .ok);
+            self.buffer.clearRetainingCapacity();
         }
 
         const nextCodepoint = if (options.enable_normalization) nextCodepointNormalized else nextCodepointRaw;
@@ -359,20 +370,25 @@ pub fn TokenReader(comptime ReaderType: type, comptime options: TokenReaderOptio
             if (c.codepoint == '\r') {
                 self.after_cr = true;
                 c.codepoint = '\n';
-                self.buffer[self.scanner.pos] = '\n';
+                self.buffer.items[self.scanner.pos] = '\n';
             }
             if (self.scanner.state == .attribute_content and
                 (c.codepoint == '\t' or c.codepoint == '\r' or c.codepoint == '\n'))
             {
                 c.codepoint = ' ';
-                self.buffer[self.scanner.pos] = ' ';
+                self.buffer.items[self.scanner.pos] = ' ';
             }
             return c;
         }
 
         fn nextCodepointRaw(self: *Self) !encoding.ReadResult {
-            const c = try self.decoder.readCodepoint(self.reader, self.buffer[self.scanner.pos..]);
-            if (c.present) self.location.advance(c.codepoint);
+            try self.buffer.ensureUnusedCapacity(self.allocator, max_encoded_codepoint_len);
+            const read_buffer = self.buffer.items.ptr[self.scanner.pos..][0..max_encoded_codepoint_len];
+            const c = try self.decoder.readCodepoint(self.reader, read_buffer);
+            if (c.present) {
+                self.buffer.items.len += c.byte_length;
+                self.location.advance(c.codepoint);
+            }
             return c;
         }
 
@@ -465,7 +481,7 @@ pub fn TokenReader(comptime ReaderType: type, comptime options: TokenReaderOptio
         }
 
         inline fn bufRange(self: *const Self, range: Scanner.Range) []const u8 {
-            return self.buffer[range.start..range.end];
+            return self.buffer.items[range.start..range.end];
         }
     };
 }
@@ -588,11 +604,46 @@ test "PI target" {
     try testInvalid(.{}, "<root><?xml version='1.0'?></root>", error.InvalidPiTarget);
 }
 
+test "limited content_token_size" {
+    try testValid(.{
+        .content_token_size = 10,
+    },
+        \\<?xml version="1.0"?>
+        \\<root>
+        \\This is a lot of text for such a small buffer.
+        \\<sub attr="And this is a long attribute value."/>
+        \\</root>
+    , &.{
+        .{ .xml_declaration = .{ .version = "1.0" } },
+        .{ .element_start = .{ .name = "root" } },
+        .{ .element_content = .{ .content = .{ .text = "\nThis is a" } } },
+        .{ .element_content = .{ .content = .{ .text = " lot of te" } } },
+        .{ .element_content = .{ .content = .{ .text = "xt for suc" } } },
+        .{ .element_content = .{ .content = .{ .text = "h a small " } } },
+        .{ .element_content = .{ .content = .{ .text = "buffer.\n" } } },
+        .{ .element_start = .{ .name = "sub" } },
+        .{ .attribute_start = .{ .name = "attr" } },
+        // The next token actually only yields 9 bytes of content since the '"'
+        // beginning the attribute value is encountered and stored in the buffer
+        // before the first attribute_content token is emitted. The
+        // content_token_size value is only a maximum, not a guaranteed ideal.
+        .{ .attribute_content = .{ .content = .{ .text = "And this " } } },
+        .{ .attribute_content = .{ .content = .{ .text = "is a long " } } },
+        .{ .attribute_content = .{ .content = .{ .text = "attribute " } } },
+        .{ .attribute_content = .{ .content = .{ .text = "value." }, .final = true } },
+        .element_end_empty,
+        .{ .element_content = .{ .content = .{ .text = "\n" } } },
+        .{ .element_end = .{ .name = "root" } },
+    });
+}
+
 fn testValid(comptime options: TokenReaderOptions, input: []const u8, expected_tokens: []const Token.Full) !void {
     var input_stream = std.io.fixedBufferStream(input);
-    var input_reader = tokenReader(input_stream.reader(), options);
+    var input_reader = tokenReader(testing.allocator, input_stream.reader(), options);
+    defer input_reader.deinit();
     var i: usize = 0;
     while (true) : (i += 1) {
+        input_reader.resetBuffer() catch {};
         const token = try input_reader.next();
         if (token == .eof) break;
         if (i >= expected_tokens.len) {
@@ -612,7 +663,8 @@ fn testValid(comptime options: TokenReaderOptions, input: []const u8, expected_t
 
 fn testInvalid(comptime options: TokenReaderOptions, input: []const u8, expected_error: anyerror) !void {
     var input_stream = std.io.fixedBufferStream(input);
-    var input_reader = tokenReader(input_stream.reader(), options);
+    var input_reader = tokenReader(testing.allocator, input_stream.reader(), options);
+    defer input_reader.deinit();
     while (input_reader.next()) |token| {
         if (token == .eof) return error.TestExpectedError;
     } else |err| {

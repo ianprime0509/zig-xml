@@ -6,11 +6,10 @@
 //!
 //! - `const max_encoded_codepoint_len` - the maximum number of bytes a
 //!    single Unicode codepoint may occupy in encoded form.
-//! - `fn readCodepoint(self: *Decoder, reader: anytype, buf: []u8) (Error || @TypeOf(reader).Error))!ReadResult` -
+//! - `fn readCodepoint(self: *Decoder, reader: anytype, buf: *[max_encoded_codepoint_len]u8) (Error || @TypeOf(reader).Error))!ReadResult` -
 //!   reads a single codepoint from a `std.io.GenericReader` and writes its UTF-8
 //!   encoding to `buf`. Should return `error.UnexpectedEndOfInput` if a full
-//!   codepoint cannot be read, `error.Overflow` if the UTF-8-encoded form cannot
-//!   be written to `buf`; other decoder-specific errors can also be used.
+//!   codepoint cannot be read.
 //! - `fn adaptTo(self: *Decoder, encoding: []const u8) error{InvalidEncoding}!void` -
 //!   accepts a UTF-8-encoded encoding name and returns an error if the desired
 //!   encoding cannot be handled by the decoder. This is intended to support
@@ -64,7 +63,7 @@ pub const DefaultDecoder = struct {
     const bom = 0xFEFF;
     const bom_byte_length = unicode.utf8CodepointSequenceLength(bom) catch unreachable;
 
-    pub fn readCodepoint(self: *DefaultDecoder, reader: anytype, buf: []u8) (Error || @TypeOf(reader).Error)!ReadResult {
+    pub fn readCodepoint(self: *DefaultDecoder, reader: anytype, buf: *[max_encoded_codepoint_len]u8) (Error || @TypeOf(reader).Error)!ReadResult {
         switch (self.state) {
             .start => {},
             inline else => |*inner| return inner.readCodepoint(reader, buf),
@@ -84,7 +83,6 @@ pub const DefaultDecoder = struct {
                 };
                 if (b2 != 0xFF) return error.InvalidUtf8;
                 self.state = .{ .utf16_be = .{} };
-                if (bom_byte_length > buf.len) return error.Overflow;
                 _ = unicode.utf8Encode(bom, buf) catch unreachable;
                 return .{ .codepoint = bom, .byte_length = bom_byte_length };
             },
@@ -95,14 +93,12 @@ pub const DefaultDecoder = struct {
                 };
                 if (b2 != 0xFE) return error.InvalidUtf8;
                 self.state = .{ .utf16_le = .{} };
-                if (bom_byte_length > buf.len) return error.Overflow;
                 _ = unicode.utf8Encode(bom, buf) catch unreachable;
                 return .{ .codepoint = bom, .byte_length = bom_byte_length };
             },
             else => {
                 // The rest of this branch is copied from Utf8Decoder
                 const byte_length = unicode.utf8ByteSequenceLength(b) catch return error.InvalidUtf8;
-                if (byte_length > buf.len) return error.Overflow;
                 buf[0] = b;
                 if (byte_length == 1) return .{ .codepoint = b, .byte_length = 1 };
                 reader.readNoEof(buf[1..byte_length]) catch |e| switch (e) {
@@ -234,15 +230,14 @@ test DefaultDecoder {
 pub const Utf8Decoder = struct {
     pub const max_encoded_codepoint_len = 4;
 
-    pub const Error = error{ InvalidUtf8, Overflow, UnexpectedEndOfInput };
+    pub const Error = error{ InvalidUtf8, UnexpectedEndOfInput };
 
-    pub fn readCodepoint(_: *Utf8Decoder, reader: anytype, buf: []u8) (Error || @TypeOf(reader).Error)!ReadResult {
+    pub fn readCodepoint(_: *Utf8Decoder, reader: anytype, buf: *[max_encoded_codepoint_len]u8) (Error || @TypeOf(reader).Error)!ReadResult {
         const b = reader.readByte() catch |e| switch (e) {
             error.EndOfStream => return ReadResult.none,
             else => |other| return other,
         };
         const byte_length = unicode.utf8ByteSequenceLength(b) catch return error.InvalidUtf8;
-        if (byte_length > buf.len) return error.Overflow;
         buf[0] = b;
         if (byte_length == 1) return .{ .codepoint = b, .byte_length = 1 };
         reader.readNoEof(buf[1..byte_length]) catch |e| switch (e) {
@@ -340,11 +335,11 @@ pub fn Utf16Decoder(comptime endian: std.builtin.Endian) type {
     return struct {
         const Self = @This();
 
-        pub const Error = error{ InvalidUtf16, Overflow, UnexpectedEndOfInput };
+        pub const Error = error{ InvalidUtf16, UnexpectedEndOfInput };
 
         pub const max_encoded_codepoint_len = 4;
 
-        pub fn readCodepoint(_: *Self, reader: anytype, buf: []u8) (Error || @TypeOf(reader).Error)!ReadResult {
+        pub fn readCodepoint(_: *Self, reader: anytype, buf: *[max_encoded_codepoint_len]u8) (Error || @TypeOf(reader).Error)!ReadResult {
             var u_buf: [2]u8 = undefined;
             const u_len = try reader.readAll(&u_buf);
             switch (u_len) {
@@ -366,7 +361,6 @@ pub fn Utf16Decoder(comptime endian: std.builtin.Endian) type {
                 else => unreachable,
             };
             const byte_length = unicode.utf8CodepointSequenceLength(codepoint) catch unreachable;
-            if (byte_length > buf.len) return error.Overflow;
             _ = unicode.utf8Encode(codepoint, buf) catch unreachable;
             return .{ .codepoint = codepoint, .byte_length = byte_length };
         }
