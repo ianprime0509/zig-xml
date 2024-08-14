@@ -1,8 +1,2 @@
-bench/*.xml
-callgrind.out.*
-core*
-fuzz/outputs
-test/xmlconf
 .zig-cache
-zig-cache
 zig-out

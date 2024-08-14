@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<?pi?>
+<root a="2" b='hello'>
+  Hi there &#32; &#x20;&#xD;&#xA;
+  One &amp; two
+  <![CDATA[<wow>]]>
+  <a:a xmlns="xml" xmlns:a="a"><b a:c="2"/></a:a>
+</root>
+<!-- comment -->
