@@ -66,7 +66,7 @@ pub fn build(b: *Build) !void {
 fn addBench(b: *Build, name: []const u8) *Step.Compile {
     const exe = b.addExecutable(.{
         .name = name,
-        .root_source_file = .{ .path = b.fmt("src/{s}.zig", .{name}) },
+        .root_source_file = b.path(b.fmt("src/{s}.zig", .{name})),
         .target = b.host,
         .optimize = .ReleaseFast,
     });
