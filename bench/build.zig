@@ -5,14 +5,6 @@ const Step = Build.Step;
 pub fn build(b: *Build) !void {
     const xml = b.dependency("xml", .{}).module("xml");
 
-    const bench_scanner = addBench(b, "scanner");
-    bench_scanner.root_module.addImport("xml", xml);
-    bench_scanner.linkLibC();
-
-    const bench_token_reader = addBench(b, "token_reader");
-    bench_token_reader.root_module.addImport("xml", xml);
-    bench_token_reader.linkLibC();
-
     const bench_reader = addBench(b, "reader");
     bench_reader.root_module.addImport("xml", xml);
     bench_reader.linkLibC();
