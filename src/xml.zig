@@ -23,17 +23,43 @@ pub const Location = struct {
         }
         loc.column += s.len - pos;
     }
+
+    pub fn format(
+        loc: Location,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
+        _ = fmt;
+        _ = options;
+        try writer.print("{}:{}", .{ loc.line, loc.column });
+    }
+
+    test format {
+        const loc: Location = .{ .line = 45, .column = 5 };
+        var buf: [4]u8 = undefined;
+        const s = try std.fmt.bufPrint(&buf, "{}", .{loc});
+        try expectEqualStrings("45:5", s);
+    }
 };
 
 pub const QName = struct {
     ns: []const u8,
     local: []const u8,
+
+    pub fn is(qname: QName, ns: []const u8, local: []const u8) bool {
+        return std.mem.eql(u8, qname.ns, ns) and std.mem.eql(u8, qname.local, local);
+    }
 };
 
 pub const PrefixedQName = struct {
     prefix: []const u8,
     ns: []const u8,
     local: []const u8,
+
+    pub fn is(qname: PrefixedQName, ns: []const u8, local: []const u8) bool {
+        return std.mem.eql(u8, qname.ns, ns) and std.mem.eql(u8, qname.local, local);
+    }
 };
 
 pub const predefined_entities = std.StaticStringMap([]const u8).initComptime(.{
@@ -91,6 +117,11 @@ pub fn GenericReader(comptime SourceError: type) type {
         /// See `Reader.skipElement`.
         pub inline fn skipElement(reader: *@This()) ReadError!void {
             return @errorCast(reader.reader.skipElement());
+        }
+
+        /// See `Reader.skipDocument`.
+        pub inline fn skipDocument(reader: *@This()) ReadError!void {
+            return @errorCast(reader.reader.skipDocument());
         }
 
         /// See `Reader.location`.
@@ -471,6 +502,9 @@ pub fn streamingOutput(writer: anytype) StreamingOutput(@TypeOf(writer)) {
 }
 
 test {
+    _ = Location;
+    _ = QName;
+    _ = PrefixedQName;
     _ = Reader;
     _ = Writer;
 }

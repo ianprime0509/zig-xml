@@ -1478,6 +1478,31 @@ test skipElement {
     try expectEqual(.eof, try reader.read());
 }
 
+/// Reads and discards the rest of the document.
+pub fn skipDocument(reader: *Reader) anyerror!void {
+    while (true) {
+        if (try reader.read() == .eof) return;
+    }
+}
+
+test skipDocument {
+    var doc = StaticDocument.init(
+        \\<root/>
+        \\<!-- A comment -->
+        \\<?pi data?>
+        \\
+    );
+    var reader = doc.reader(std.testing.allocator, .{});
+    defer reader.deinit();
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+    try reader.skipDocument();
+    try expectEqual(.eof, try reader.read());
+}
+
 fn readXmlDeclarationContent(reader: *Reader) !void {
     while (true) {
         try reader.readSpace();
