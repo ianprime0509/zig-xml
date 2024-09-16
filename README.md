@@ -33,6 +33,14 @@ tests within. Due to features missing in the current parser implementation (DTD
 support), many tests are currently skipped. At the time of writing, 250 tests
 pass, and 924 are skipped due to unsupported features.
 
+## Fuzzing
+
+There is a fuzzing sub-project in the `fuzz` directory using
+https://github.com/kristoff-it/zig-afl-kit. If running on Zig 0.13.0, an extra
+step needs to be taken to make the fuzzing more effective:
+https://github.com/kristoff-it/zig-afl-kit/blob/main/README.md#-------important-------
+On Zig master, this is not needed.
+
 ## License
 
 zig-xml is free software, released under the [Zero Clause BSD
