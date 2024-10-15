@@ -9,6 +9,10 @@ pub fn build(b: *Build) !void {
     bench_reader.root_module.addImport("xml", xml);
     bench_reader.linkLibC();
 
+    const bench_encoded_reader = addBench(b, "encoded_reader");
+    bench_encoded_reader.root_module.addImport("xml", xml);
+    bench_encoded_reader.linkLibC();
+
     const libxml2 = b.dependency("libxml2", .{
         .optimize = .ReleaseFast,
     });
@@ -59,7 +63,7 @@ fn addBench(b: *Build, name: []const u8) *Step.Compile {
     const exe = b.addExecutable(.{
         .name = name,
         .root_source_file = b.path(b.fmt("src/{s}.zig", .{name})),
-        .target = b.host,
+        .target = b.graph.host,
         .optimize = .ReleaseFast,
     });
     b.installArtifact(exe);

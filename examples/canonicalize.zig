@@ -24,7 +24,8 @@ pub fn main() !void {
 
     var input_file = try std.fs.cwd().openFile(input orelse return error.InvalidArguments, .{});
     defer input_file.close();
-    var doc = xml.streamingDocument(gpa, input_file.reader());
+    var encoding = xml.Encoding.Default.init;
+    var doc = xml.encodedDocument(gpa, input_file.reader(), encoding.encoding());
     defer doc.deinit();
     var reader = doc.reader(gpa, .{});
     defer reader.deinit();

@@ -15,10 +15,11 @@ pub fn main() !void {
 
     var input_file = try std.fs.cwd().openFile(args[1], .{});
     defer input_file.close();
+    var encoding = xml.Encoding.Default.init;
     // It is not necessary to wrap the input in a BufferedReader. The streaming
     // document uses an internal buffer and reads its input in chunks, not byte
     // by byte.
-    var doc = xml.streamingDocument(gpa, input_file.reader());
+    var doc = xml.encodedDocument(gpa, input_file.reader(), encoding.encoding());
     defer doc.deinit();
     var reader = doc.reader(gpa, .{});
     defer reader.deinit();

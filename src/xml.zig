@@ -83,6 +83,8 @@ pub const predefined_namespace_prefixes = std.StaticStringMap([]const u8).initCo
     .{ ns_xmlns, "xmlns" },
 });
 
+pub const Encoding = @import("Encoding.zig");
+
 pub const Reader = @import("Reader.zig");
 
 pub fn GenericReader(comptime SourceError: type) type {
@@ -330,6 +332,7 @@ pub const StaticDocument = struct {
         return .{
             .context = doc,
             .moveFn = &move,
+            .checkEncodingFn = Encoding.utf8.checkEncodingFn,
         };
     }
 
@@ -374,6 +377,7 @@ pub fn StreamingDocument(comptime ReaderType: type) type {
             return .{
                 .context = doc,
                 .moveFn = &move,
+                .checkEncodingFn = Encoding.utf8.checkEncodingFn,
             };
         }
 
@@ -399,7 +403,7 @@ pub fn StreamingDocument(comptime ReaderType: type) type {
                 const new_buf_len = @min(min_buf_len, std.math.ceilPowerOfTwoAssert(usize, target_len));
                 doc.buf = try doc.gpa.realloc(doc.buf, new_buf_len);
             }
-            doc.avail += try doc.stream.read(doc.buf[doc.avail..]);
+            doc.avail += try doc.stream.readAll(doc.buf[doc.avail..]);
         }
     };
 }
@@ -415,6 +419,130 @@ test streamingDocument {
         \\
     );
     var doc = xml.streamingDocument(std.testing.allocator, fbs.reader());
+    defer doc.deinit();
+    var reader = doc.reader(std.testing.allocator, .{});
+    defer reader.deinit();
+
+    try expectEqual(.xml_declaration, try reader.read());
+    try expectEqualStrings("1.0", reader.xmlDeclarationVersion());
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.text, try reader.read());
+    try expectEqualStrings("Hello, world!", reader.textRaw());
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.eof, try reader.read());
+}
+
+pub fn EncodedDocument(comptime ReaderType: type) type {
+    return struct {
+        stream: ReaderType,
+        encoding: Encoding,
+        buf: []u8,
+        pos: usize,
+        avail: usize,
+        raw_buf: [4096]u8,
+        raw_buf_len: usize,
+        gpa: Allocator,
+
+        pub const Error = ReaderType.Error || Allocator.Error || error{InvalidEncoding};
+
+        pub fn init(gpa: Allocator, stream: ReaderType, encoding: Encoding) @This() {
+            var doc: @This() = .{
+                .stream = stream,
+                .encoding = encoding,
+                .buf = &.{},
+                .pos = 0,
+                .avail = 0,
+                .raw_buf = undefined,
+                .raw_buf_len = 0,
+                .gpa = gpa,
+            };
+            // We need to get an initial sample of the document for the encoding
+            // implementation to perform an initial guess of the document's
+            // encoding (e.g. looking at the BOM for UTF-16). If the read here
+            // fails, that is fine, since presumably it will fail again later
+            // when attempting to actually read the document content.
+            doc.raw_buf_len = doc.stream.readAll(&doc.raw_buf) catch 0;
+            doc.encoding.guess(doc.raw_buf[0..doc.raw_buf_len]);
+            return doc;
+        }
+
+        pub fn deinit(doc: *@This()) void {
+            doc.gpa.free(doc.buf);
+            doc.* = undefined;
+        }
+
+        pub fn reader(doc: *@This(), gpa: Allocator, options: Reader.Options) GenericReader(Error) {
+            var modified_options = options;
+            modified_options.assume_valid_utf8 = true;
+            return .{ .reader = Reader.init(gpa, doc.source(), modified_options) };
+        }
+
+        pub fn source(doc: *@This()) Reader.Source {
+            return .{
+                .context = doc,
+                .moveFn = &move,
+                .checkEncodingFn = &checkEncoding,
+            };
+        }
+
+        fn move(context: *const anyopaque, advance: usize, len: usize) anyerror![]const u8 {
+            const doc: *@This() = @alignCast(@constCast(@ptrCast(context)));
+            doc.pos += advance;
+            if (len <= doc.avail - doc.pos) return doc.buf[doc.pos..][0..len];
+            doc.discardRead();
+            try doc.fillBuffer(len);
+            return doc.buf[0..@min(len, doc.avail)];
+        }
+
+        fn discardRead(doc: *@This()) void {
+            doc.avail -= doc.pos;
+            std.mem.copyForwards(u8, doc.buf[0..doc.avail], doc.buf[doc.pos..][0..doc.avail]);
+            doc.pos = 0;
+        }
+
+        const min_buf_len = 4096;
+
+        fn fillBuffer(doc: *@This(), target_len: usize) !void {
+            if (target_len > doc.buf.len) {
+                const new_buf_len = @min(min_buf_len, std.math.ceilPowerOfTwoAssert(usize, target_len));
+                doc.buf = try doc.gpa.realloc(doc.buf, new_buf_len);
+            }
+            while (doc.avail < target_len) {
+                doc.raw_buf_len += try doc.stream.readAll(doc.raw_buf[doc.raw_buf_len..]);
+                if (doc.raw_buf_len == 0) return;
+                const res = doc.encoding.transcode(doc.buf[doc.avail..], doc.raw_buf[0..doc.raw_buf_len]);
+                doc.avail += res.dest_written;
+                std.mem.copyForwards(u8, doc.raw_buf[0..doc.raw_buf_len], doc.raw_buf[res.src_read..doc.raw_buf_len]);
+                doc.raw_buf_len -= res.src_read;
+                if (res.err) return error.InvalidEncoding;
+                if (res.dest_written == 0) break; // no more space in dest buffer
+            }
+        }
+
+        fn checkEncoding(context: *const anyopaque, encoding: []const u8) bool {
+            const doc: *const @This() = @alignCast(@ptrCast(context));
+            return doc.encoding.checkEncoding(encoding);
+        }
+    };
+}
+
+pub fn encodedDocument(gpa: Allocator, reader: anytype, encoding: Encoding) EncodedDocument(@TypeOf(reader)) {
+    return EncodedDocument(@TypeOf(reader)).init(gpa, reader, encoding);
+}
+
+test encodedDocument {
+    var fbs = std.io.fixedBufferStream(
+        \\<?xml version="1.0"?>
+        \\<root>Hello, world!</root>
+        \\
+    );
+    var doc = xml.encodedDocument(std.testing.allocator, fbs.reader(), xml.Encoding.utf8);
     defer doc.deinit();
     var reader = doc.reader(std.testing.allocator, .{});
     defer reader.deinit();

@@ -174,16 +174,21 @@ pub const ErrorCode = enum {
     expected_equals,
     expected_quote,
     missing_end_quote,
-    invalid_utf8,
+    invalid_encoding,
     illegal_character,
 };
 
 pub const Source = struct {
     context: *const anyopaque,
     moveFn: *const fn (context: *const anyopaque, advance: usize, len: usize) anyerror![]const u8,
+    checkEncodingFn: *const fn (context: *const anyopaque, encoding: []const u8) bool,
 
     pub fn move(source: Source, advance: usize, len: usize) anyerror![]const u8 {
         return source.moveFn(source.context, advance, len);
+    }
+
+    pub fn checkEncoding(source: Source, encoding: []const u8) bool {
+        return source.checkEncodingFn(source.context, encoding);
     }
 };
 
@@ -1595,7 +1600,7 @@ fn checkXmlVersion(reader: *Reader, version: []const u8, n_attr: usize) !void {
 }
 
 fn checkXmlEncoding(reader: *Reader, encoding: []const u8, n_attr: usize) !void {
-    if (!std.ascii.eqlIgnoreCase(encoding, "utf-8")) {
+    if (!reader.source.checkEncoding(encoding)) {
         return reader.fatal(.xml_declaration_encoding_unsupported, reader.attributeValuePos(n_attr));
     }
 }
@@ -2179,7 +2184,7 @@ fn fatalInvalidUtf8(reader: *Reader, s: []const u8, pos: usize) error{MalformedX
         if (!std.unicode.utf8ValidateSlice(s[invalid_pos..][0..cp_len])) break;
         invalid_pos += cp_len;
     }
-    return reader.fatal(.invalid_utf8, pos + invalid_pos);
+    return reader.fatal(.invalid_encoding, pos + invalid_pos);
 }
 
 const base_read_size = 4096;

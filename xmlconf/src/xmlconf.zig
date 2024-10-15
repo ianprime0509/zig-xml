@@ -139,7 +139,10 @@ fn runFile(gpa: Allocator, path: []const u8, results: *Results) !void {
     defer dir.close();
     const data = try dir.readFileAlloc(gpa, std.fs.path.basename(path), max_file_size);
     defer gpa.free(data);
-    var doc = xml.StaticDocument.init(data);
+    var fbs = std.io.fixedBufferStream(data);
+    var encoding = xml.Encoding.Default.init;
+    var doc = xml.encodedDocument(gpa, fbs.reader(), encoding.encoding());
+    defer doc.deinit();
     var reader = doc.reader(gpa, .{});
     defer reader.deinit();
 
@@ -214,12 +217,6 @@ fn runTest(gpa: Allocator, dir: std.fs.Dir, reader: *xml.Reader, results: *Resul
     defer if (output) |o| gpa.free(o);
     try reader.skipElement();
 
-    if (std.mem.startsWith(u8, input, "\xFE\xFF") or
-        std.mem.startsWith(u8, input, "\xFF\xFE"))
-    {
-        return results.skip(id, "UTF-16 unsupported", .{});
-    }
-
     const options: TestOptions = .{
         .namespace = namespace == .yes,
     };
@@ -242,7 +239,9 @@ fn runTestParseable(
     options: TestOptions,
     results: *Results,
 ) !void {
-    var doc = xml.StaticDocument.init(input);
+    var fbs = std.io.fixedBufferStream(input);
+    var encoding = xml.Encoding.Default.init;
+    var doc = xml.encodedDocument(gpa, fbs.reader(), encoding.encoding());
     var reader = doc.reader(gpa, .{
         .namespace_aware = options.namespace,
     });
@@ -266,6 +265,7 @@ fn runTestParseable(
                     },
                 }
             },
+            error.InvalidEncoding => return results.fail(id, "invalid encoding", .{}),
             error.OutOfMemory => return error.OutOfMemory,
         };
         switch (node) {
@@ -329,7 +329,9 @@ fn runTestUnparseable(
     options: TestOptions,
     results: *Results,
 ) !void {
-    var doc = xml.StaticDocument.init(input);
+    var fbs = std.io.fixedBufferStream(input);
+    var encoding = xml.Encoding.Default.init;
+    var doc = xml.encodedDocument(gpa, fbs.reader(), encoding.encoding());
     var reader = doc.reader(gpa, .{
         .namespace_aware = options.namespace,
     });
@@ -342,6 +344,7 @@ fn runTestUnparseable(
                 .xml_declaration_encoding_unsupported => return results.skip(id, "encoding unsupported", .{}),
                 else => return results.pass(id),
             },
+            error.InvalidEncoding => return results.pass(id),
             error.OutOfMemory => return error.OutOfMemory,
         };
         if (node == .eof) return results.fail(id, "expected to fail to parse", .{});
