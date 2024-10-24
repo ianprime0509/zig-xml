@@ -183,6 +183,17 @@ pub fn text(writer: *Writer, s: []const u8) anyerror!void {
     writer.state = .text;
 }
 
+// insert some existing XML document without escaping anything
+pub fn embed(writer: *Writer, s: []const u8) anyerror!void {
+    switch (writer.state) {
+        .after_structure_end, .text => {},
+        .element_start => try writer.raw(">"),
+        .start, .after_bom, .after_xml_declaration, .end => unreachable,
+    }
+    try writer.raw(s);
+    writer.state = .after_structure_end;
+}
+
 fn newLineAndIndent(writer: *Writer) anyerror!void {
     if (writer.options.indent.len == 0) return;
 
