@@ -183,6 +183,20 @@ pub fn text(writer: *Writer, s: []const u8) anyerror!void {
     writer.state = .text;
 }
 
+// insert some existing XML document without escaping anything
+pub fn embed(writer: *Writer, s: []const u8) anyerror!void {
+    switch (writer.state) {
+        .start, .after_bom, .after_xml_declaration, .after_structure_end, .text, .end => {},
+        .element_start => try writer.raw(">"),
+    }
+    try writer.raw(s);
+    writer.state = switch (writer.state) {
+        .start, .after_bom, .after_xml_declaration => .after_xml_declaration,
+        .element_start, .after_structure_end, .text => .text,
+        .end => .end,
+    };
+}
+
 fn newLineAndIndent(writer: *Writer) anyerror!void {
     if (writer.options.indent.len == 0) return;
 
@@ -196,3 +210,47 @@ fn newLineAndIndent(writer: *Writer) anyerror!void {
 fn raw(writer: *Writer, s: []const u8) anyerror!void {
     try writer.sink.write(s);
 }
+
+test {
+    _ = T;
+}
+const T = struct {
+    const Testbed = struct {
+        buf: std.ArrayList(u8),
+        fn init(a: std.mem.Allocator) Testbed {
+            return .{
+                .buf = std.ArrayList(u8).init(a),
+            };
+        }
+        fn writer(self: *Testbed, indent: []const u8) Writer {
+            return Writer.init(.{
+                .context = self,
+                .writeFn = write,
+            }, .{ .indent = indent });
+        }
+        fn write(context: *const anyopaque, data: []const u8) anyerror!void {
+            // TODO not sure why context is const.
+            var self: *Testbed = @constCast(@alignCast(@ptrCast(context)));
+            try self.buf.appendSlice(data);
+        }
+        fn output(self: *Testbed) []const u8 {
+            return self.buf.items;
+        }
+        fn deinit(self: *Testbed) void {
+            self.buf.deinit();
+        }
+    };
+    test "embed" {
+        var tb = Testbed.init(std.testing.allocator);
+        defer tb.deinit();
+        var wtr = tb.writer("  ");
+        try wtr.xmlDeclaration("UTF-8", null);
+        try wtr.elementStart("foo");
+        try wtr.embed("<bar>Baz!</bar>");
+        try wtr.elementEnd("foo");
+        try std.testing.expectEqualStrings(
+            \\<?xml version="1.0" encoding="UTF-8"?>
+            \\<foo><bar>Baz!</bar></foo>
+        , tb.output());
+    }
+};

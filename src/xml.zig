@@ -467,6 +467,10 @@ pub fn GenericWriter(comptime SinkError: type) type {
         pub inline fn text(writer: *@This(), s: []const u8) WriteError!void {
             return @errorCast(writer.writer.text(s));
         }
+
+        pub inline fn embed(writer: *@This(), s: []const u8) WriteError!void {
+            return @errorCast(writer.writer.embed(s));
+        }
     };
 }
 
