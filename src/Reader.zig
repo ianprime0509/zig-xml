@@ -2236,6 +2236,6 @@ fn addString(reader: *Reader, s: []const u8) !StringIndex {
     return @enumFromInt(start);
 }
 
-fn string(reader: Reader, index: StringIndex) []const u8 {
+fn string(reader: *const Reader, index: StringIndex) []const u8 {
     return std.mem.sliceTo(reader.strings.items[@intFromEnum(index)..], 0);
 }
