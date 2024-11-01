@@ -270,7 +270,16 @@ fn elementStartInternal(writer: *Writer, prefix: []const u8, local: []const u8) 
     }
     try writer.write(local);
 
-    const element_name = try writer.addPrefixedString(prefix, local);
+    // TODO: this is what I would _like_ to do, but prefix may point into
+    //  strings, which can be invalidated while resizing it...
+    // const element_name = try writer.addPrefixedString(prefix, local);
+    // This temporary allocation is reliable, but ugly. At least local won't
+    // point into strings, so we can avoid the allocation if there's no prefix.
+    const element_name = if (prefix.len > 0) name: {
+        const tmp = try std.fmt.allocPrint(writer.gpa, "{s}:{s}", .{ prefix, local });
+        defer writer.gpa.free(tmp);
+        break :name try writer.addString(tmp);
+    } else try writer.addString(local);
     try writer.element_names.append(writer.gpa, element_name);
     writer.state = .element_start;
 
@@ -773,4 +782,26 @@ fn addPrefixedString(writer: *Writer, prefix: []const u8, s: []const u8) !String
 
 fn string(writer: *const Writer, index: StringIndex) []const u8 {
     return std.mem.sliceTo(writer.strings.items[@intFromEnum(index)..], 0);
+}
+
+test "namespace prefix strings resize bug" {
+    // Reported here: https://github.com/ianprime0509/zig-xml/pull/41#issuecomment-2449960818
+    var raw = std.ArrayList(u8).init(std.testing.allocator);
+    defer raw.deinit();
+    const out = streamingOutput(raw.writer());
+    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    defer writer.deinit();
+
+    try writer.bindNs("d", "foospace");
+    try writer.elementStartNs("foospace", "root");
+    try writer.elementStartNs("foospace", "child");
+    try writer.text("Hello, Bug");
+    try writer.elementEnd();
+    try writer.elementEnd();
+
+    try expectEqualStrings(
+        \\<d:root xmlns:d="foospace">
+        \\  <d:child>Hello, Bug</d:child>
+        \\</d:root>
+    , raw.items);
 }
