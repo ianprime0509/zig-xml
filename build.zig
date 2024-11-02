@@ -35,8 +35,9 @@ pub fn build(b: *Build) void {
     docs_step.dependOn(&xml_docs_copy.step);
 
     const install_examples_step = b.step("install-examples", "Build and install the example programs");
+
     const example_reader_exe = b.addExecutable(.{
-        .name = "example-reader",
+        .name = "reader",
         .root_source_file = b.path("examples/reader.zig"),
         .target = target,
         .optimize = optimize,
@@ -44,4 +45,14 @@ pub fn build(b: *Build) void {
     example_reader_exe.root_module.addImport("xml", xml);
     const example_reader_install = b.addInstallArtifact(example_reader_exe, .{});
     install_examples_step.dependOn(&example_reader_install.step);
+
+    const example_canonicalize_exe = b.addExecutable(.{
+        .name = "canonicalize",
+        .root_source_file = b.path("examples/canonicalize.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    example_canonicalize_exe.root_module.addImport("xml", xml);
+    const example_canonicalize_install = b.addInstallArtifact(example_canonicalize_exe, .{});
+    install_examples_step.dependOn(&example_canonicalize_install.step);
 }

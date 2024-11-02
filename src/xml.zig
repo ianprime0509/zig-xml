@@ -76,6 +76,10 @@ pub const predefined_namespace_uris = std.StaticStringMap([]const u8).initCompti
     .{ "xml", ns_xml },
     .{ "xmlns", ns_xmlns },
 });
+pub const predefined_namespace_prefixes = std.StaticStringMap([]const u8).initComptime(.{
+    .{ ns_xml, "xml" },
+    .{ ns_xmlns, "xmlns" },
+});
 
 pub const Reader = @import("Reader.zig");
 
@@ -434,42 +438,72 @@ pub fn GenericWriter(comptime SinkError: type) type {
     return struct {
         writer: Writer,
 
-        pub const WriteError = Writer.WriteError || SinkError;
+        /// See `Writer.deinit`.
+        pub inline fn deinit(writer: *@This()) void {
+            writer.writer.deinit();
+        }
 
+        // TODO: not all the write functions actually need to allocate
+        pub const WriteError = Writer.WriteError || SinkError || Allocator.Error;
+
+        /// See `Writer.bom`.
         pub inline fn bom(writer: *@This()) WriteError!void {
             return @errorCast(writer.writer.bom());
         }
 
+        /// See `Writer.xmlDeclaration`.
         pub inline fn xmlDeclaration(writer: *@This(), encoding: ?[]const u8, standalone: ?bool) WriteError!void {
             return @errorCast(writer.writer.xmlDeclaration(encoding, standalone));
         }
 
+        /// See `Writer.elementStart`.
         pub inline fn elementStart(writer: *@This(), name: []const u8) WriteError!void {
             return @errorCast(writer.writer.elementStart(name));
         }
 
-        pub inline fn elementEnd(writer: *@This(), name: []const u8) WriteError!void {
-            return @errorCast(writer.writer.elementEnd(name));
+        /// See `Writer.elementStartNs`.
+        pub inline fn elementStartNs(writer: *@This(), ns: []const u8, local: []const u8) WriteError!void {
+            return @errorCast(writer.writer.elementStartNs(ns, local));
         }
 
+        /// See `Writer.elementEnd`.
+        pub inline fn elementEnd(writer: *@This()) WriteError!void {
+            return @errorCast(writer.writer.elementEnd());
+        }
+
+        /// See `Writer.elementEndEmpty`.
         pub inline fn elementEndEmpty(writer: *@This()) WriteError!void {
             return @errorCast(writer.writer.elementEndEmpty());
         }
 
+        /// See `Writer.attribute`.
         pub inline fn attribute(writer: *@This(), name: []const u8, value: []const u8) WriteError!void {
             return @errorCast(writer.writer.attribute(name, value));
         }
 
+        /// See `Writer.attributeNs`.
+        pub inline fn attributeNs(writer: *@This(), ns: []const u8, local: []const u8, value: []const u8) WriteError!void {
+            return @errorCast(writer.writer.attributeNs(ns, local, value));
+        }
+
+        /// See `Writer.pi`.
         pub inline fn pi(writer: *@This(), target: []const u8, data: []const u8) WriteError!void {
             return @errorCast(writer.writer.pi(target, data));
         }
 
+        /// See `Writer.text`.
         pub inline fn text(writer: *@This(), s: []const u8) WriteError!void {
             return @errorCast(writer.writer.text(s));
         }
 
+        /// See `Writer.embed`.
         pub inline fn embed(writer: *@This(), s: []const u8) WriteError!void {
             return @errorCast(writer.writer.embed(s));
+        }
+
+        /// See `Writer.bindNs`.
+        pub inline fn bindNs(writer: *@This(), prefix: []const u8, ns: []const u8) WriteError!void {
+            return @errorCast(writer.writer.bindNs(prefix, ns));
         }
     };
 }
@@ -480,8 +514,8 @@ pub fn StreamingOutput(comptime WriterType: type) type {
 
         pub const Error = WriterType.Error;
 
-        pub fn writer(out: *const @This(), options: Writer.Options) GenericWriter(Error) {
-            return .{ .writer = Writer.init(out.sink(), options) };
+        pub fn writer(out: *const @This(), gpa: Allocator, options: Writer.Options) GenericWriter(Error) {
+            return .{ .writer = Writer.init(gpa, out.sink(), options) };
         }
 
         pub fn sink(out: *const @This()) Writer.Sink {
@@ -503,6 +537,28 @@ pub fn StreamingOutput(comptime WriterType: type) type {
 
 pub fn streamingOutput(writer: anytype) StreamingOutput(@TypeOf(writer)) {
     return .{ .stream = writer };
+}
+
+test streamingOutput {
+    var raw = std.ArrayList(u8).init(std.testing.allocator);
+    defer raw.deinit();
+    const out = streamingOutput(raw.writer());
+    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    defer writer.deinit();
+
+    try writer.xmlDeclaration("UTF-8", null);
+    try writer.elementStart("test");
+    try writer.elementStart("inner");
+    try writer.text("Hello, world!");
+    try writer.elementEnd();
+    try writer.elementEnd();
+
+    try expectEqualStrings(
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<test>
+        \\  <inner>Hello, world!</inner>
+        \\</test>
+    , raw.items);
 }
 
 test {
