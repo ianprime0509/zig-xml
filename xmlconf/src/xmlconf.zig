@@ -250,8 +250,9 @@ fn runTestParseable(
 
     var canonical_buf = std.ArrayList(u8).init(gpa);
     defer canonical_buf.deinit();
-    var canonical_output = xml.streamingOutput(canonical_buf.writer());
-    var canonical = canonical_output.writer(.{});
+    const canonical_output = xml.streamingOutput(canonical_buf.writer());
+    var canonical = canonical_output.writer(gpa, .{});
+    defer canonical.deinit();
 
     while (true) {
         const node = reader.read() catch |err| switch (err) {
@@ -286,7 +287,7 @@ fn runTestParseable(
                 }
             },
             .element_end => {
-                try canonical.elementEnd(reader.elementName());
+                try canonical.elementEnd();
             },
             .pi => {
                 try canonical.pi(reader.piTarget(), try reader.piData());
