@@ -9,7 +9,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(gpa);
     defer std.process.argsFree(gpa, args);
     if (args.len != 2) {
-        return error.InvalidArguments; // usage: example-reader file
+        return error.InvalidArguments; // usage: reader file
     }
 
     var input_file = try std.fs.cwd().openFile(args[1], .{});
