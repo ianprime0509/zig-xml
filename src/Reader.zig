@@ -26,8 +26,11 @@
 //! - Memory returned by functions whose names end in `Alloc` is allocated using
 //!   a provided allocator and owned by the caller.
 //! - Memory returned by functions whose names do not end in `Alloc` is owned by
-//!   the `Reader` and is only valid until the next call to a `read` or `skip`
-//!   function or `deinit`.
+//!   the `Reader` and is only valid until the next call to another reader
+//!   function.
+//!   - Functions such as `attributeValue` which only conditionally allocate
+//!     store any allocated data in a scratch buffer in the reader which is
+//!     cleared on every call to such a function.
 //! - Functions whose names end in `Write` write their results into a
 //!   `std.io.AnyWriter`.
 //! - Functions whose names end in `Ns` may only be called on a `Reader`
@@ -322,7 +325,7 @@ test errorLocation {
 
 /// Returns the version declared in the XML declaration.
 /// Asserts that the current node is `Node.xml_declaration`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn xmlDeclarationVersion(reader: Reader) []const u8 {
     assert(reader.node == .xml_declaration);
     return reader.attributeValueUnchecked(0);
@@ -341,7 +344,7 @@ test xmlDeclarationVersion {
 
 /// Returns the encoding declared in the XML declaration.
 /// Asserts that the current node is `Node.xml_declaration`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn xmlDeclarationEncoding(reader: Reader) ?[]const u8 {
     assert(reader.node == .xml_declaration);
     const n = reader.attributes.get("encoding") orelse return null;
@@ -380,7 +383,7 @@ test xmlDeclarationStandalone {
 
 /// Returns the name of the element.
 /// Asserts that the current node is `Node.element_start` or `Node.element_end`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn elementName(reader: Reader) []const u8 {
     assert(reader.node == .element_start or reader.node == .element_end);
     return reader.elementNameUnchecked();
@@ -400,7 +403,7 @@ test elementName {
 
 /// Returns the name of the element as a `PrefixedQName`.
 /// Asserts that the current node is `Node.element_start` or `Node.element_end` and that `reader` is namespace-aware.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn elementNameNs(reader: Reader) PrefixedQName {
     assert(reader.options.namespace_aware);
     return reader.parseQName(reader.elementName());
@@ -535,7 +538,7 @@ fn attributeNamePos(reader: Reader, n: usize) usize {
 /// This function may incur allocations if the attribute value contains entity or character
 /// references, or CR, LF, or TAB characters which must be normalized according to the spec.
 /// Asserts that the current node is `Node.element_start` and `n` is less than `reader.nAttributes()`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn attributeValue(reader: *Reader, n: usize) Allocator.Error![]const u8 {
     const raw = reader.attributeValueRaw(n);
     if (std.mem.indexOfAny(u8, raw, "&\t\r\n") == null) return raw;
@@ -660,7 +663,7 @@ test attributeValueWrite {
 
 /// Returns the raw value of the `n`th attribute of the element, as it appears in the source.
 /// Asserts that the current node is `Node.element_start` and `n` is less than `reader.nAttributes()`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn attributeValueRaw(reader: Reader, n: usize) []const u8 {
     assert(reader.node == .element_start and n < reader.attributeCount());
     return reader.attributeValueUnchecked(n);
@@ -745,7 +748,7 @@ test attributeIndexNs {
 /// This function may incur allocations if the comment text contains CR
 /// characters which must be normalized according to the spec.
 /// Asserts that the current node is `Node.comment`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn comment(reader: *Reader) Allocator.Error![]const u8 {
     return reader.newlineNormalizedScratch(reader.commentRaw());
 }
@@ -784,7 +787,7 @@ test commentWrite {
 
 /// Returns the raw text of the comment, as it appears in the source.
 /// Asserts that the current node is `Node.comment`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn commentRaw(reader: Reader) []const u8 {
     assert(reader.node == .comment);
     return reader.commentUnchecked();
@@ -811,7 +814,7 @@ fn commentPos(reader: Reader) usize {
 
 /// Returns the target of the PI.
 /// Asserts that the current node is `Node.pi`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn piTarget(reader: Reader) []const u8 {
     assert(reader.node == .pi);
     return reader.piTargetUnchecked();
@@ -844,7 +847,7 @@ fn piTargetEndPos(reader: Reader) usize {
 /// This function may incur allocations if the PI data contains CR
 /// characters which must be normalized according to the spec.
 /// Asserts that the current node is `Node.pi`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn piData(reader: *Reader) Allocator.Error![]const u8 {
     return reader.newlineNormalizedScratch(reader.piDataRaw());
 }
@@ -883,7 +886,7 @@ test piDataWrite {
 
 /// Returns the raw data of the PI, as it appears in the source.
 /// Asserts that the current node is `Node.pi`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn piDataRaw(reader: Reader) []const u8 {
     assert(reader.node == .pi);
     return reader.piDataUnchecked();
@@ -916,7 +919,7 @@ fn piDataEndPos(reader: Reader) usize {
 /// This function may incur allocations if the text contains CR
 /// characters which must be normalized according to the spec.
 /// Asserts that the current node is `Node.text`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn text(reader: *Reader) Allocator.Error![]const u8 {
     return reader.newlineNormalizedScratch(reader.textRaw());
 }
@@ -955,7 +958,7 @@ test textWrite {
 
 /// Returns the raw text, as it appears in the source.
 /// Asserts that the current node is `Node.text`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn textRaw(reader: Reader) []const u8 {
     assert(reader.node == .text);
     return reader.textUnchecked();
@@ -985,7 +988,7 @@ fn textPos(reader: Reader) usize {
 /// This function may incur allocations if the text contains CR
 /// characters which must be normalized according to the spec.
 /// Asserts that the current node is `Node.cdata`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn cdata(reader: *Reader) Allocator.Error![]const u8 {
     return reader.newlineNormalizedScratch(reader.cdataRaw());
 }
@@ -1024,7 +1027,7 @@ test cdataWrite {
 
 /// Returns the raw text of the CDATA section, as it appears in the source.
 /// Asserts that the current node is `Node.cdata`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn cdataRaw(reader: Reader) []const u8 {
     assert(reader.node == .cdata);
     return reader.cdataUnchecked();
@@ -1051,7 +1054,7 @@ fn cdataPos(reader: Reader) usize {
 
 /// Returns the name of the referenced entity.
 /// Asserts that the current node is `Node.entity_reference`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn entityReferenceName(reader: Reader) []const u8 {
     assert(reader.node == .entity_reference);
     return reader.entityReferenceNameUnchecked();
@@ -1096,7 +1099,7 @@ test characterReferenceChar {
 
 /// Returns the "name" of the referenced character, as it appears in the source.
 /// Asserts that the current node is `Node.character_reference`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn characterReferenceName(reader: Reader) []const u8 {
     assert(reader.node == .character_reference);
     return reader.characterReferenceNameUnchecked();
@@ -1148,7 +1151,7 @@ fn writeNewlineNormalized(raw: []const u8, writer: std.io.AnyWriter) anyerror!vo
 
 /// Returns the namespace URI bound to `prefix`, or an empty string if none.
 /// If the reader is not namespace-aware, always returns an empty string.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn namespaceUri(reader: Reader, prefix: []const u8) []const u8 {
     if (!reader.options.namespace_aware) return "";
     if (predefined_namespace_uris.get(prefix)) |uri| return uri;
@@ -1367,7 +1370,7 @@ pub fn read(reader: *Reader) anyerror!Node {
 /// Reads and returns the text content of the element and its children.
 /// The current node after returning is the end of the element.
 /// Asserts that the current node is `Node.element_start`.
-/// The returned memory is owned by `reader` and valid only until the next call to a `read` or `skip` function or `deinit`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
 pub fn readElementText(reader: *Reader) anyerror![]const u8 {
     reader.scratch.clearRetainingCapacity();
     const writer = reader.scratch.writer(reader.gpa);
