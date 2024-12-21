@@ -12,8 +12,8 @@
         },
         .@"zig-afl-kit" = .{
             // https://github.com/kristoff-it/zig-afl-kit/pull/1
-            .url = "git+https://github.com/ianprime0509/zig-afl-kit?ref=afl-path#5b0770089d2144eb7bde61bb02604344ec5f5d24",
-            .hash = "1220208b7e29e54dd723ebba03cd41e358d10bb3d75477cb4b43f73db29844f9efb9",
+            .url = "git+https://github.com/ianprime0509/zig-afl-kit?ref=afl-path#a77ce265ba72bcf5db84dc5f951c468e0a1d5649",
+            .hash = "122068b896eafc665a7d9a485fb5c29c2542c1c1768249a849722faafb937a249d4d",
         },
     },
 }

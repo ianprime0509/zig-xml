@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
     });
     afl_obj.root_module.stack_check = false;
     afl_obj.root_module.link_libc = true;
-    if (@hasField(@TypeOf(afl_obj.root_module), "fuzz")) afl_obj.root_module.fuzz = true;
+    if (@hasField(std.Build.Module, "fuzz")) afl_obj.root_module.fuzz = true;
     afl_obj.root_module.addImport("xml", xml.module("xml"));
 
     const afl_exe = afl.addInstrumentedExe(b, target, .Debug, afl_obj);
