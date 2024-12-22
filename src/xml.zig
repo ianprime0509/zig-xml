@@ -505,6 +505,11 @@ pub fn GenericWriter(comptime SinkError: type) type {
         pub inline fn bindNs(writer: *@This(), prefix: []const u8, ns: []const u8) WriteError!void {
             return @errorCast(writer.writer.bindNs(prefix, ns));
         }
+
+        /// Returns the underlying raw `Writer`.
+        pub inline fn raw(writer: *@This()) *Writer {
+            return &writer.writer;
+        }
     };
 }
 
