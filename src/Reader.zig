@@ -50,14 +50,14 @@ const expectEqual = std.testing.expectEqual;
 const expectEqualDeep = std.testing.expectEqualDeep;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
-const Location = @import("xml.zig").Location;
-const StaticDocument = @import("xml.zig").StaticDocument;
-const QName = @import("xml.zig").QName;
-const PrefixedQName = @import("xml.zig").PrefixedQName;
-const predefined_entities = @import("xml.zig").predefined_entities;
-const predefined_namespace_uris = @import("xml.zig").predefined_namespace_uris;
-const ns_xml = @import("xml.zig").ns_xml;
-const ns_xmlns = @import("xml.zig").ns_xmlns;
+const xml = @import("xml.zig");
+const Location = xml.Location;
+const QName = xml.QName;
+const PrefixedQName = xml.PrefixedQName;
+const predefined_entities = xml.predefined_entities;
+const predefined_namespace_uris = xml.predefined_namespace_uris;
+const ns_xml = xml.ns_xml;
+const ns_xmlns = xml.ns_xmlns;
 
 options: Options,
 
@@ -247,7 +247,7 @@ pub fn location(reader: Reader) Location {
 }
 
 test location {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root>
         \\  <sub>Hello, world!</sub>
         \\</root>
@@ -285,7 +285,7 @@ pub fn errorCode(reader: Reader) ErrorCode {
 }
 
 test errorCode {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root>
         \\  <123>Hello, world!</123>
         \\</root>
@@ -309,7 +309,7 @@ pub fn errorLocation(reader: Reader) Location {
 }
 
 test errorLocation {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root>
         \\  <123>Hello, world!</123>
         \\</root>
@@ -332,7 +332,7 @@ pub fn xmlDeclarationVersion(reader: Reader) []const u8 {
 }
 
 test xmlDeclarationVersion {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<?xml version="1.0"?>
         \\<root/>
     );
@@ -352,7 +352,7 @@ pub fn xmlDeclarationEncoding(reader: Reader) ?[]const u8 {
 }
 
 test xmlDeclarationEncoding {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<?xml version="1.0" encoding="UTF-8"?>
         \\<root/>
     );
@@ -371,7 +371,7 @@ pub fn xmlDeclarationStandalone(reader: Reader) ?bool {
 }
 
 test xmlDeclarationStandalone {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         \\<root/>
     );
@@ -390,7 +390,7 @@ pub fn elementName(reader: Reader) []const u8 {
 }
 
 test elementName {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root/>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -410,7 +410,7 @@ pub fn elementNameNs(reader: Reader) PrefixedQName {
 }
 
 test elementNameNs {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root xmlns="https://example.com/ns" xmlns:a="https://example.com/ns2">
         \\  <a:a/>
         \\</root>
@@ -459,7 +459,7 @@ pub fn attributeCount(reader: Reader) usize {
 }
 
 test attributeCount {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root a="1" b="2" c="3"/>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -481,7 +481,7 @@ pub fn attributeName(reader: Reader, n: usize) []const u8 {
 }
 
 test attributeName {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root a="1" b="2" c="3"/>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -506,7 +506,7 @@ pub fn attributeNameNs(reader: Reader, n: usize) PrefixedQName {
 }
 
 test attributeNameNs {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root xmlns:pre="https://example.com/ns" a="1" pre:b="2"/>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -552,7 +552,7 @@ pub fn attributeValue(reader: *Reader, n: usize) Allocator.Error![]const u8 {
 }
 
 test attributeValue {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root a="1" b="2" c="1 &amp; 2"/>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -578,7 +578,7 @@ pub fn attributeValueAlloc(reader: Reader, gpa: Allocator, n: usize) Allocator.E
 }
 
 test attributeValueAlloc {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root a="1" b="2" c="1 &amp; 2"/>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -639,7 +639,7 @@ pub fn attributeValueWrite(reader: Reader, n: usize, writer: std.io.AnyWriter) a
 }
 
 test attributeValueWrite {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root a="1" b="2" c="1 &amp; 2"/>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -670,7 +670,7 @@ pub fn attributeValueRaw(reader: Reader, n: usize) []const u8 {
 }
 
 test attributeValueRaw {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root a="1" b="2" c="1 &amp; 2"/>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -710,7 +710,7 @@ pub fn attributeIndex(reader: Reader, name: []const u8) ?usize {
 }
 
 test attributeIndex {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root one="1" two="2" three="3"/>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -730,7 +730,7 @@ pub fn attributeIndexNs(reader: Reader, ns: []const u8, local: []const u8) ?usiz
 }
 
 test attributeIndexNs {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root xmlns="http://example.com" xmlns:foo="http://example.com/foo" one="1" foo:two="2"/>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -754,7 +754,7 @@ pub fn comment(reader: *Reader) Allocator.Error![]const u8 {
 }
 
 test comment {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<!-- Hello, world! -->
         \\<root/>
     );
@@ -771,7 +771,7 @@ pub fn commentWrite(reader: Reader, writer: std.io.AnyWriter) anyerror!void {
 }
 
 test commentWrite {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<!-- Hello, world! -->
         \\<root/>
     );
@@ -794,7 +794,7 @@ pub fn commentRaw(reader: Reader) []const u8 {
 }
 
 test commentRaw {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<!-- Hello, world! -->
         \\<root/>
     );
@@ -821,7 +821,7 @@ pub fn piTarget(reader: Reader) []const u8 {
 }
 
 test piTarget {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<?pi-target pi-data?>
         \\<root/>
     );
@@ -853,7 +853,7 @@ pub fn piData(reader: *Reader) Allocator.Error![]const u8 {
 }
 
 test piData {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<?pi-target pi-data?>
         \\<root/>
     );
@@ -870,7 +870,7 @@ pub fn piDataWrite(reader: Reader, writer: std.io.AnyWriter) anyerror!void {
 }
 
 test piDataWrite {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<?pi-target pi-data?>
         \\<root/>
     );
@@ -893,7 +893,7 @@ pub fn piDataRaw(reader: Reader) []const u8 {
 }
 
 test piDataRaw {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<?pi-target pi-data?>
         \\<root/>
     );
@@ -925,7 +925,7 @@ pub fn text(reader: *Reader) Allocator.Error![]const u8 {
 }
 
 test text {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root>Hello, world!</root>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -942,7 +942,7 @@ pub fn textWrite(reader: Reader, writer: std.io.AnyWriter) anyerror!void {
 }
 
 test textWrite {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root>Hello, world!</root>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -965,7 +965,7 @@ pub fn textRaw(reader: Reader) []const u8 {
 }
 
 test textRaw {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root>Hello, world!</root>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -994,7 +994,7 @@ pub fn cdata(reader: *Reader) Allocator.Error![]const u8 {
 }
 
 test cdata {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root><![CDATA[Hello, world!]]></root>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -1011,7 +1011,7 @@ pub fn cdataWrite(reader: Reader, writer: std.io.AnyWriter) anyerror!void {
 }
 
 test cdataWrite {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root><![CDATA[Hello, world!]]></root>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -1034,7 +1034,7 @@ pub fn cdataRaw(reader: Reader) []const u8 {
 }
 
 test cdataRaw {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root><![CDATA[Hello, world!]]></root>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -1061,7 +1061,7 @@ pub fn entityReferenceName(reader: Reader) []const u8 {
 }
 
 test entityReferenceName {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root>&amp;</root>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -1087,7 +1087,7 @@ pub fn characterReferenceChar(reader: Reader) u21 {
 }
 
 test characterReferenceChar {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root>&#x20;</root>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -1106,7 +1106,7 @@ pub fn characterReferenceName(reader: Reader) []const u8 {
 }
 
 test characterReferenceName {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root>&#x20;</root>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -1166,7 +1166,7 @@ pub fn namespaceUri(reader: Reader, prefix: []const u8) []const u8 {
 }
 
 test namespaceUri {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root
         \\  xmlns="https://example.com/default"
         \\  xmlns:other="https://example.com/other"
@@ -1379,7 +1379,7 @@ pub fn readElementText(reader: *Reader) anyerror![]const u8 {
 }
 
 test readElementText {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root>Hello, <em>world</em>!</root>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -1408,7 +1408,7 @@ pub fn readElementTextAlloc(reader: *Reader, gpa: Allocator) anyerror![]u8 {
 }
 
 test readElementTextAlloc {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root>Hello, <em>world</em>!</root>
     );
     var reader = doc.reader(std.testing.allocator, .{});
@@ -1461,7 +1461,7 @@ pub fn skipProlog(reader: *Reader) anyerror!void {
 }
 
 test skipProlog {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<?xml version="1.0"?>
         \\<!-- Irrelevant comment -->
         \\<?some-pi?>
@@ -1491,7 +1491,7 @@ pub fn skipElement(reader: *Reader) anyerror!void {
 }
 
 test skipElement {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root>
         \\  <sub>Hello, world!</sub>
         \\  <!-- Some comment -->
@@ -1516,7 +1516,7 @@ pub fn skipDocument(reader: *Reader) anyerror!void {
 }
 
 test skipDocument {
-    var doc = StaticDocument.init(
+    var doc = xml.StaticDocument.init(
         \\<root/>
         \\<!-- A comment -->
         \\<?pi data?>

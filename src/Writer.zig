@@ -1,12 +1,26 @@
+//! An XML writer, intended to output XML documents conforming to the [XML 1.0
+//! (Fifth Edition)](https://www.w3.org/TR/2008/REC-xml-20081126) and
+//! [Namespaces in XML 1.0 (Third
+//! Edition)](https://www.w3.org/TR/2009/REC-xml-names-20091208/)
+//! specifications.
+//!
+//! This is the core, type-erased writer implementation. Generally, users will
+//! not use this directly, but will use `xml.GenericWriter`, which is a thin
+//! wrapper around this type providing type safety for returned errors.
+//!
+//! A writer writes its data to a `Sink`, which represents an output stream.
+//! Typically, this will be a wrapper around a `std.io.GenericWriter` or
+//! `std.io.AnyWriter` via the `xml.StreamingOutput` wrapper.
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
-const ns_xmlns = @import("xml.zig").ns_xmlns;
-const predefined_namespace_prefixes = @import("xml.zig").predefined_namespace_prefixes;
-const streamingOutput = @import("xml.zig").streamingOutput;
+const xml = @import("xml.zig");
+const ns_xmlns = xml.ns_xmlns;
+const predefined_namespace_prefixes = xml.predefined_namespace_prefixes;
 
 options: Options,
 
@@ -116,7 +130,7 @@ pub fn bom(writer: *Writer) anyerror!void {
 test bom {
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 
@@ -152,7 +166,7 @@ pub fn xmlDeclaration(writer: *Writer, encoding: ?[]const u8, standalone: ?bool)
 test xmlDeclaration {
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 
@@ -182,7 +196,7 @@ pub fn elementStart(writer: *Writer, name: []const u8) anyerror!void {
 test elementStart {
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 
@@ -229,7 +243,7 @@ pub fn elementStartNs(writer: *Writer, ns: []const u8, local: []const u8) anyerr
 test elementStartNs {
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 
@@ -329,7 +343,7 @@ pub fn elementEnd(writer: *Writer) anyerror!void {
 test elementEnd {
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 
@@ -358,7 +372,7 @@ pub fn elementEndEmpty(writer: *Writer) anyerror!void {
 test elementEndEmpty {
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 
@@ -405,7 +419,7 @@ pub fn attribute(writer: *Writer, name: []const u8, value: []const u8) anyerror!
 test attribute {
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 
@@ -462,7 +476,7 @@ pub fn attributeNs(writer: *Writer, ns: []const u8, local: []const u8, value: []
 test attributeNs {
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 
@@ -539,7 +553,7 @@ pub fn pi(writer: *Writer, target: []const u8, data: []const u8) anyerror!void {
 test pi {
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 
@@ -583,7 +597,7 @@ pub fn text(writer: *Writer, s: []const u8) anyerror!void {
 test text {
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 
@@ -619,7 +633,7 @@ pub fn embed(writer: *Writer, s: []const u8) anyerror!void {
 test embed {
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 
@@ -646,7 +660,7 @@ pub fn bindNs(writer: *Writer, prefix: []const u8, ns: []const u8) anyerror!void
 test bindNs {
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 
@@ -788,7 +802,7 @@ test "namespace prefix strings resize bug" {
     // Reported here: https://github.com/ianprime0509/zig-xml/pull/41#issuecomment-2449960818
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 

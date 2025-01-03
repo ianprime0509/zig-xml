@@ -4,6 +4,8 @@ const assert = std.debug.assert;
 const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
+const xml = @This();
+
 pub const Location = struct {
     line: usize,
     column: usize,
@@ -412,7 +414,7 @@ test streamingDocument {
         \\<root>Hello, world!</root>
         \\
     );
-    var doc = streamingDocument(std.testing.allocator, fbs.reader());
+    var doc = xml.streamingDocument(std.testing.allocator, fbs.reader());
     defer doc.deinit();
     var reader = doc.reader(std.testing.allocator, .{});
     defer reader.deinit();
@@ -547,7 +549,7 @@ pub fn streamingOutput(writer: anytype) StreamingOutput(@TypeOf(writer)) {
 test streamingOutput {
     var raw = std.ArrayList(u8).init(std.testing.allocator);
     defer raw.deinit();
-    const out = streamingOutput(raw.writer());
+    const out = xml.streamingOutput(raw.writer());
     var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
     defer writer.deinit();
 
