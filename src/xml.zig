@@ -488,6 +488,11 @@ pub fn GenericWriter(comptime SinkError: type) type {
             return @errorCast(writer.writer.attributeNs(ns, local, value));
         }
 
+        /// See `Writer.comment`.
+        pub inline fn comment(writer: *@This(), s: []const u8) WriteError!void {
+            return @errorCast(writer.writer.comment(s));
+        }
+
         /// See `Writer.pi`.
         pub inline fn pi(writer: *@This(), target: []const u8, data: []const u8) WriteError!void {
             return @errorCast(writer.writer.pi(target, data));
@@ -496,6 +501,21 @@ pub fn GenericWriter(comptime SinkError: type) type {
         /// See `Writer.text`.
         pub inline fn text(writer: *@This(), s: []const u8) WriteError!void {
             return @errorCast(writer.writer.text(s));
+        }
+
+        /// See `Writer.cdata`.
+        pub inline fn cdata(writer: *@This(), s: []const u8) WriteError!void {
+            return @errorCast(writer.writer.cdata(s));
+        }
+
+        /// See `Writer.characterReference`.
+        pub inline fn characterReference(writer: *@This(), c: u21) WriteError!void {
+            return @errorCast(writer.writer.characterReference(c));
+        }
+
+        /// See `Writer.entityReference`.
+        pub inline fn entityReference(writer: *@This(), name: []const u8) WriteError!void {
+            return @errorCast(writer.writer.entityReference(name));
         }
 
         /// See `Writer.embed`.

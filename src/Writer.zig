@@ -528,6 +528,44 @@ fn attributeText(writer: *Writer, s: []const u8) anyerror!void {
     try writer.write(s[pos..]);
 }
 
+/// Writes a comment.
+pub fn comment(writer: *Writer, s: []const u8) anyerror!void {
+    switch (writer.state) {
+        .start, .after_bom, .after_xml_declaration, .text, .end => {},
+        .element_start => {
+            try writer.write(">");
+            try writer.newLineAndIndent();
+        },
+        .after_structure_end => {
+            try writer.newLineAndIndent();
+        },
+    }
+    try writer.write("<!--");
+    try writer.write(s);
+    try writer.write("-->");
+    writer.state = .after_structure_end;
+}
+
+test comment {
+    var raw = std.ArrayList(u8).init(std.testing.allocator);
+    defer raw.deinit();
+    const out = xml.streamingOutput(raw.writer());
+    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    defer writer.deinit();
+
+    try writer.comment(" Here is the document: ");
+    try writer.elementStart("root");
+    try writer.comment(" I am inside the document ");
+    try writer.elementEnd();
+
+    try expectEqualStrings(
+        \\<!-- Here is the document: -->
+        \\<root>
+        \\  <!-- I am inside the document -->
+        \\</root>
+    , raw.items);
+}
+
 /// Writes a PI (processing instruction).
 pub fn pi(writer: *Writer, target: []const u8, data: []const u8) anyerror!void {
     switch (writer.state) {
@@ -609,6 +647,96 @@ test text {
         \\<root>Sample XML: &lt;root>&#xD;
         \\&amp;amp;&#xD;
         \\&lt;/root></root>
+    , raw.items);
+}
+
+/// Writes a CDATA node.
+/// Asserts that the writer is in an element.
+pub fn cdata(writer: *Writer, s: []const u8) anyerror!void {
+    switch (writer.state) {
+        .after_structure_end, .text => {},
+        .element_start => try writer.write(">"),
+        .start, .after_bom, .after_xml_declaration, .end => unreachable,
+    }
+    try writer.write("<![CDATA[");
+    try writer.write(s);
+    try writer.write("]]>");
+    writer.state = .text;
+}
+
+test cdata {
+    var raw = std.ArrayList(u8).init(std.testing.allocator);
+    defer raw.deinit();
+    const out = xml.streamingOutput(raw.writer());
+    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    defer writer.deinit();
+
+    try writer.elementStart("root");
+    try writer.cdata("Look, no <escaping> needed!");
+    try writer.elementEnd();
+
+    try expectEqualStrings(
+        \\<root><![CDATA[Look, no <escaping> needed!]]></root>
+    , raw.items);
+}
+
+/// Writes a character reference.
+/// Asserts that the writer is in an element.
+pub fn characterReference(writer: *Writer, c: u21) anyerror!void {
+    switch (writer.state) {
+        .after_structure_end, .text => {},
+        .element_start => try writer.write(">"),
+        .start, .after_bom, .after_xml_declaration, .end => unreachable,
+    }
+    const fmt = "&#x{X};";
+    var buf: [std.fmt.count(fmt, .{std.math.maxInt(u21)})]u8 = undefined;
+    try writer.write(std.fmt.bufPrint(&buf, fmt, .{c}) catch unreachable);
+    writer.state = .text;
+}
+
+test characterReference {
+    var raw = std.ArrayList(u8).init(std.testing.allocator);
+    defer raw.deinit();
+    const out = xml.streamingOutput(raw.writer());
+    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    defer writer.deinit();
+
+    try writer.elementStart("root");
+    try writer.characterReference('龍');
+    try writer.elementEnd();
+
+    try expectEqualStrings(
+        \\<root>&#x9F8D;</root>
+    , raw.items);
+}
+
+/// Writes an entity reference.
+/// Asserts that the writer is in an element.
+pub fn entityReference(writer: *Writer, name: []const u8) anyerror!void {
+    switch (writer.state) {
+        .after_structure_end, .text => {},
+        .element_start => try writer.write(">"),
+        .start, .after_bom, .after_xml_declaration, .end => unreachable,
+    }
+    try writer.write("&");
+    try writer.write(name);
+    try writer.write(";");
+    writer.state = .text;
+}
+
+test entityReference {
+    var raw = std.ArrayList(u8).init(std.testing.allocator);
+    defer raw.deinit();
+    const out = xml.streamingOutput(raw.writer());
+    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    defer writer.deinit();
+
+    try writer.elementStart("root");
+    try writer.entityReference("amp");
+    try writer.elementEnd();
+
+    try expectEqualStrings(
+        \\<root>&amp;</root>
     , raw.items);
 }
 
