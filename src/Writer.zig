@@ -512,12 +512,9 @@ fn attributeInternal(writer: *Writer, prefix: []const u8, name: []const u8, valu
 
 fn attributeText(writer: *Writer, s: []const u8) anyerror!void {
     var pos: usize = 0;
-    while (std.mem.indexOfAnyPos(u8, s, pos, "\r\n\t&<\"")) |esc_pos| {
+    while (std.mem.indexOfAnyPos(u8, s, pos, "&<\"")) |esc_pos| {
         try writer.write(s[pos..esc_pos]);
         try writer.write(switch (s[esc_pos]) {
-            '\r' => "&#xD;",
-            '\n' => "&#xA;",
-            '\t' => "&#x9;",
             '&' => "&amp;",
             '<' => "&lt;",
             '"' => "&quot;",
@@ -618,10 +615,9 @@ pub fn text(writer: *Writer, s: []const u8) anyerror!void {
         .start, .after_bom, .after_xml_declaration, .end => unreachable,
     }
     var pos: usize = 0;
-    while (std.mem.indexOfAnyPos(u8, s, pos, "\r&<")) |esc_pos| {
+    while (std.mem.indexOfAnyPos(u8, s, pos, "&<")) |esc_pos| {
         try writer.write(s[pos..esc_pos]);
         try writer.write(switch (s[esc_pos]) {
-            '\r' => "&#xD;",
             '&' => "&amp;",
             '<' => "&lt;",
             else => unreachable,
@@ -640,12 +636,12 @@ test text {
     defer writer.deinit();
 
     try writer.elementStart("root");
-    try writer.text("Sample XML: <root>\r\n&amp;\r\n</root>");
+    try writer.text("Sample XML: <root>\n&amp;\n</root>");
     try writer.elementEnd();
 
     try expectEqualStrings(
-        \\<root>Sample XML: &lt;root>&#xD;
-        \\&amp;amp;&#xD;
+        \\<root>Sample XML: &lt;root>
+        \\&amp;amp;
         \\&lt;/root></root>
     , raw.items);
 }
