@@ -448,6 +448,11 @@ pub fn GenericWriter(comptime SinkError: type) type {
         // TODO: not all the write functions actually need to allocate
         pub const WriteError = Writer.WriteError || SinkError || Allocator.Error;
 
+        /// See `Writer.eof`.
+        pub inline fn eof(writer: *@This()) WriteError!void {
+            return @errorCast(writer.writer.eof());
+        }
+
         /// See `Writer.bom`.
         pub inline fn bom(writer: *@This()) WriteError!void {
             return @errorCast(writer.writer.bom());

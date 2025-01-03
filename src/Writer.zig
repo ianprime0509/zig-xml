@@ -89,6 +89,7 @@ const State = enum {
     after_structure_end,
     text,
     end,
+    eof,
 };
 
 pub fn init(gpa: Allocator, sink: Sink, options: Options) Writer {
@@ -119,6 +120,31 @@ pub fn deinit(writer: *Writer) void {
 
 pub const WriteError = error{};
 
+/// Writes the end of the document.
+/// If `Options.indent` is non-empty, this writes a trailing newline;
+/// otherwise, it does not write anything, but signals that further write
+/// functions should not be called.
+/// Asserts that the writer is after the root element.
+pub fn eof(writer: *Writer) anyerror!void {
+    assert(writer.state == .end);
+    if (writer.options.indent.len != 0) try writer.write("\n");
+    writer.state = .eof;
+}
+
+test eof {
+    var raw = std.ArrayList(u8).init(std.testing.allocator);
+    defer raw.deinit();
+    const out = xml.streamingOutput(raw.writer());
+    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    defer writer.deinit();
+
+    try writer.elementStart("root");
+    try writer.elementEndEmpty();
+    try writer.eof();
+
+    try expectEqualStrings("<root/>\n", raw.items);
+}
+
 /// Writes the BOM (byte-order mark).
 /// Asserts that the writer is at the beginning of the document.
 pub fn bom(writer: *Writer) anyerror!void {
@@ -137,8 +163,9 @@ test bom {
     try writer.bom();
     try writer.elementStart("root");
     try writer.elementEndEmpty();
+    try writer.eof();
 
-    try expectEqualStrings("\u{FEFF}<root/>", raw.items);
+    try expectEqualStrings("\u{FEFF}<root/>\n", raw.items);
 }
 
 /// Writes the XML declaration.
@@ -173,10 +200,12 @@ test xmlDeclaration {
     try writer.xmlDeclaration("UTF-8", true);
     try writer.elementStart("root");
     try writer.elementEndEmpty();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         \\<root/>
+        \\
     , raw.items);
 }
 
@@ -204,12 +233,14 @@ test elementStart {
     try writer.elementStart("element");
     try writer.elementEnd();
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<root>
         \\  <element>
         \\  </element>
         \\</root>
+        \\
     , raw.items);
 }
 
@@ -253,6 +284,7 @@ test elementStartNs {
     try writer.elementEnd();
     try writer.elementEnd();
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<ns0:root xmlns:ns0="http://example.com/foo">
@@ -261,6 +293,7 @@ test elementStartNs {
         \\    </ns0:element>
         \\  </ns1:element>
         \\</ns0:root>
+        \\
     , raw.items);
 }
 
@@ -274,7 +307,7 @@ fn elementStartInternal(writer: *Writer, prefix: []const u8, local: []const u8) 
         .after_structure_end => {
             try writer.newLineAndIndent();
         },
-        .end => unreachable,
+        .end, .eof => unreachable,
     }
 
     try writer.write("<");
@@ -326,7 +359,7 @@ pub fn elementEnd(writer: *Writer) anyerror!void {
         .after_structure_end => {
             try writer.newLineAndIndent();
         },
-        .start, .after_bom, .after_xml_declaration, .end => unreachable,
+        .start, .after_bom, .after_xml_declaration, .end, .eof => unreachable,
     }
     try writer.write("</");
     try writer.write(writer.string(name));
@@ -351,22 +384,24 @@ test elementEnd {
     try writer.elementStart("element");
     try writer.elementEnd();
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<root>
         \\  <element>
         \\  </element>
         \\</root>
+        \\
     , raw.items);
 }
 
 /// Ends the currently open element as an empty element (`<foo/>`).
 /// Asserts that the writer is in an element start.
 pub fn elementEndEmpty(writer: *Writer) anyerror!void {
+    _ = writer.element_names.pop();
     assert(writer.state == .element_start);
     try writer.write("/>");
-    writer.state = .after_structure_end;
-    _ = writer.element_names.pop();
+    writer.state = if (writer.element_names.items.len > 0) .after_structure_end else .end;
 }
 
 test elementEndEmpty {
@@ -380,11 +415,13 @@ test elementEndEmpty {
     try writer.elementStart("element");
     try writer.elementEndEmpty();
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<root>
         \\  <element/>
         \\</root>
+        \\
     , raw.items);
 }
 
@@ -432,12 +469,14 @@ test attribute {
     try writer.elementStartNs("http://example.com/a", "element");
     try writer.elementEndEmpty();
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<root key="value" xmlns="http://example.com" xmlns:a="http://example.com/a">
         \\  <element/>
         \\  <a:element/>
         \\</root>
+        \\
     , raw.items);
 }
 
@@ -488,12 +527,14 @@ test attributeNs {
     try writer.elementStartNs("http://example.com/a", "element");
     try writer.elementEndEmpty();
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<root xmlns:ns0="http://example.com" ns0:key="value" xmlns:a="http://example.com/a">
         \\  <ns0:element/>
         \\  <a:element/>
         \\</root>
+        \\
     , raw.items);
 }
 
@@ -536,6 +577,7 @@ pub fn comment(writer: *Writer, s: []const u8) anyerror!void {
         .after_structure_end => {
             try writer.newLineAndIndent();
         },
+        .eof => unreachable,
     }
     try writer.write("<!--");
     try writer.write(s);
@@ -554,12 +596,14 @@ test comment {
     try writer.elementStart("root");
     try writer.comment(" I am inside the document ");
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<!-- Here is the document: -->
         \\<root>
         \\  <!-- I am inside the document -->
         \\</root>
+        \\
     , raw.items);
 }
 
@@ -574,6 +618,7 @@ pub fn pi(writer: *Writer, target: []const u8, data: []const u8) anyerror!void {
         .after_structure_end => {
             try writer.newLineAndIndent();
         },
+        .eof => unreachable,
     }
     try writer.write("<?");
     try writer.write(target);
@@ -596,12 +641,14 @@ test pi {
     try writer.elementStart("root");
     try writer.pi("handle-me", "");
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<?some-pi some pi data?>
         \\<root>
         \\  <?handle-me?>
         \\</root>
+        \\
     , raw.items);
 }
 
@@ -612,7 +659,7 @@ pub fn text(writer: *Writer, s: []const u8) anyerror!void {
     switch (writer.state) {
         .after_structure_end, .text => {},
         .element_start => try writer.write(">"),
-        .start, .after_bom, .after_xml_declaration, .end => unreachable,
+        .start, .after_bom, .after_xml_declaration, .end, .eof => unreachable,
     }
     var pos: usize = 0;
     while (std.mem.indexOfAnyPos(u8, s, pos, "&<")) |esc_pos| {
@@ -638,11 +685,13 @@ test text {
     try writer.elementStart("root");
     try writer.text("Sample XML: <root>\n&amp;\n</root>");
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<root>Sample XML: &lt;root>
         \\&amp;amp;
         \\&lt;/root></root>
+        \\
     , raw.items);
 }
 
@@ -652,7 +701,7 @@ pub fn cdata(writer: *Writer, s: []const u8) anyerror!void {
     switch (writer.state) {
         .after_structure_end, .text => {},
         .element_start => try writer.write(">"),
-        .start, .after_bom, .after_xml_declaration, .end => unreachable,
+        .start, .after_bom, .after_xml_declaration, .end, .eof => unreachable,
     }
     try writer.write("<![CDATA[");
     try writer.write(s);
@@ -670,9 +719,11 @@ test cdata {
     try writer.elementStart("root");
     try writer.cdata("Look, no <escaping> needed!");
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<root><![CDATA[Look, no <escaping> needed!]]></root>
+        \\
     , raw.items);
 }
 
@@ -682,7 +733,7 @@ pub fn characterReference(writer: *Writer, c: u21) anyerror!void {
     switch (writer.state) {
         .after_structure_end, .text => {},
         .element_start => try writer.write(">"),
-        .start, .after_bom, .after_xml_declaration, .end => unreachable,
+        .start, .after_bom, .after_xml_declaration, .end, .eof => unreachable,
     }
     const fmt = "&#x{X};";
     var buf: [std.fmt.count(fmt, .{std.math.maxInt(u21)})]u8 = undefined;
@@ -700,9 +751,11 @@ test characterReference {
     try writer.elementStart("root");
     try writer.characterReference('龍');
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<root>&#x9F8D;</root>
+        \\
     , raw.items);
 }
 
@@ -712,7 +765,7 @@ pub fn entityReference(writer: *Writer, name: []const u8) anyerror!void {
     switch (writer.state) {
         .after_structure_end, .text => {},
         .element_start => try writer.write(">"),
-        .start, .after_bom, .after_xml_declaration, .end => unreachable,
+        .start, .after_bom, .after_xml_declaration, .end, .eof => unreachable,
     }
     try writer.write("&");
     try writer.write(name);
@@ -730,9 +783,11 @@ test entityReference {
     try writer.elementStart("root");
     try writer.entityReference("amp");
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<root>&amp;</root>
+        \\
     , raw.items);
 }
 
@@ -745,12 +800,14 @@ pub fn embed(writer: *Writer, s: []const u8) anyerror!void {
     switch (writer.state) {
         .start, .after_bom, .after_xml_declaration, .after_structure_end, .text, .end => {},
         .element_start => try writer.write(">"),
+        .eof => unreachable,
     }
     try writer.write(s);
     writer.state = switch (writer.state) {
         .start, .after_bom, .after_xml_declaration => .after_xml_declaration,
         .element_start, .after_structure_end, .text => .text,
         .end => .end,
+        .eof => unreachable,
     };
 }
 
@@ -765,10 +822,12 @@ test embed {
     try writer.elementStart("foo");
     try writer.embed("<bar>Baz!</bar>");
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<?xml version="1.0" encoding="UTF-8"?>
         \\<foo><bar>Baz!</bar></foo>
+        \\
     , raw.items);
 }
 
@@ -801,11 +860,13 @@ test bindNs {
     try writer.bindNs("ex3", "http://example.com/ns3");
     try writer.elementEndEmpty();
     try writer.elementEnd();
+    try writer.eof();
 
     try expectEqualStrings(
         \\<ex:root xmlns:ex="http://example.com" ex:a="value">
         \\  <ex:element xmlns:ex2="http://example.com/ns2" ex2:a="value" xmlns:ex3="http://example.com/ns3"/>
         \\</ex:root>
+        \\
     , raw.items);
 }
 
