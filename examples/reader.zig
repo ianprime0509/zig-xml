@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log;
 const xml = @import("xml");
 
 pub fn main() !void {
@@ -26,9 +27,13 @@ pub fn main() !void {
     const stdout = stdout_buf.writer();
 
     while (true) {
-        const node = reader.read() catch |err| {
-            try stdout.print("{}: {}\n", .{ err, reader.reader.error_code });
-            break;
+        const node = reader.read() catch |err| switch (err) {
+            error.MalformedXml => {
+                const loc = reader.errorLocation();
+                log.err("{}:{}: {}", .{ loc.line, loc.column, reader.errorCode() });
+                return error.MalformedXml;
+            },
+            else => |other| return other,
         };
         switch (node) {
             .eof => break,
