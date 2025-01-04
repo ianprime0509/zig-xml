@@ -59,7 +59,7 @@ fn addBench(b: *Build, name: []const u8) *Step.Compile {
     const exe = b.addExecutable(.{
         .name = name,
         .root_source_file = b.path(b.fmt("src/{s}.zig", .{name})),
-        .target = b.host,
+        .target = b.graph.host,
         .optimize = .ReleaseFast,
     });
     b.installArtifact(exe);
