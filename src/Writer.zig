@@ -837,7 +837,8 @@ test embed {
 ///
 /// If the writer is currently inside an element start, the namespace is
 /// declared immediately. Otherwise, it will be declared on the next element
-/// started.
+/// started. If/when `prefix` is null the namespace will be declared as a
+/// default namespace (no prefix) for the element.
 pub fn bindNs(writer: *Writer, prefix: ?[]const u8, ns: []const u8) anyerror!void {
     if (prefix != null) {
         try writer.bindNsInternal(try writer.addString(prefix.?), ns);
