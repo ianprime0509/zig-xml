@@ -543,7 +543,9 @@ fn attributeInternal(writer: *Writer, prefix: []const u8, name: []const u8, valu
     try writer.write(" ");
     if (prefix.len > 0) {
         try writer.write(prefix);
-        try writer.write(":");
+        if(name.len > 0) {
+            try writer.write(":");
+        }
     }
     try writer.write(name);
     try writer.write("=\"");
@@ -836,8 +838,12 @@ test embed {
 /// If the writer is currently inside an element start, the namespace is
 /// declared immediately. Otherwise, it will be declared on the next element
 /// started.
-pub fn bindNs(writer: *Writer, prefix: []const u8, ns: []const u8) anyerror!void {
-    try writer.bindNsInternal(try writer.addString(prefix), ns);
+pub fn bindNs(writer: *Writer, prefix: ?[]const u8, ns: []const u8) anyerror!void {
+    if (prefix != null) {
+        try writer.bindNsInternal(try writer.addString(prefix.?), ns);
+    } else {
+        try writer.bindNsInternal(@enumFromInt(writer.strings.items.len), ns);
+    }
 }
 
 test bindNs {

@@ -529,7 +529,7 @@ pub fn GenericWriter(comptime SinkError: type) type {
         }
 
         /// See `Writer.bindNs`.
-        pub inline fn bindNs(writer: *@This(), prefix: []const u8, ns: []const u8) WriteError!void {
+        pub inline fn bindNs(writer: *@This(), prefix: ?[]const u8, ns: []const u8) WriteError!void {
             return @errorCast(writer.writer.bindNs(prefix, ns));
         }
 
