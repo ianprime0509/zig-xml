@@ -865,12 +865,16 @@ test bindNs {
     // declared regardless.
     try writer.bindNs("ex3", "http://example.com/ns3");
     try writer.elementEndEmpty();
+    try writer.elementStart("ex4");
+    try writer.bindNs(null, "http://example.com/ex4");
+    try writer.elementEndEmpty();
     try writer.elementEnd();
     try writer.eof();
 
     try expectEqualStrings(
         \\<ex:root xmlns:ex="http://example.com" ex:a="value">
         \\  <ex:element xmlns:ex2="http://example.com/ns2" ex2:a="value" xmlns:ex3="http://example.com/ns3"/>
+        \\  <ex4 xmlns="http://example.com/ex4"/>
         \\</ex:root>
         \\
     , raw.items);
