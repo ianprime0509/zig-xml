@@ -543,7 +543,9 @@ fn attributeInternal(writer: *Writer, prefix: []const u8, name: []const u8, valu
     try writer.write(" ");
     if (prefix.len > 0) {
         try writer.write(prefix);
-        try writer.write(":");
+        if(name.len > 0) {
+            try writer.write(":");
+        }
     }
     try writer.write(name);
     try writer.write("=\"");
@@ -835,7 +837,8 @@ test embed {
 ///
 /// If the writer is currently inside an element start, the namespace is
 /// declared immediately. Otherwise, it will be declared on the next element
-/// started.
+/// started. If/when `prefix` is null the namespace will be declared as a
+/// default namespace (no prefix) for the element.
 pub fn bindNs(writer: *Writer, prefix: []const u8, ns: []const u8) anyerror!void {
     try writer.bindNsInternal(try writer.addString(prefix), ns);
 }
@@ -859,12 +862,16 @@ test bindNs {
     // declared regardless.
     try writer.bindNs("ex3", "http://example.com/ns3");
     try writer.elementEndEmpty();
+    try writer.elementStart("ex4");
+    try writer.bindNs("", "http://example.com/ex4");
+    try writer.elementEndEmpty();
     try writer.elementEnd();
     try writer.eof();
 
     try expectEqualStrings(
         \\<ex:root xmlns:ex="http://example.com" ex:a="value">
         \\  <ex:element xmlns:ex2="http://example.com/ns2" ex2:a="value" xmlns:ex3="http://example.com/ns3"/>
+        \\  <ex4 xmlns="http://example.com/ex4"/>
         \\</ex:root>
         \\
     , raw.items);
