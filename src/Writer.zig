@@ -839,12 +839,8 @@ test embed {
 /// declared immediately. Otherwise, it will be declared on the next element
 /// started. If/when `prefix` is null the namespace will be declared as a
 /// default namespace (no prefix) for the element.
-pub fn bindNs(writer: *Writer, prefix: ?[]const u8, ns: []const u8) anyerror!void {
-    if (prefix != null) {
-        try writer.bindNsInternal(try writer.addString(prefix.?), ns);
-    } else {
-        try writer.bindNsInternal(@enumFromInt(writer.strings.items.len), ns);
-    }
+pub fn bindNs(writer: *Writer, prefix: []const u8, ns: []const u8) anyerror!void {
+    try writer.bindNsInternal(try writer.addString(prefix), ns);
 }
 
 test bindNs {
@@ -867,7 +863,7 @@ test bindNs {
     try writer.bindNs("ex3", "http://example.com/ns3");
     try writer.elementEndEmpty();
     try writer.elementStart("ex4");
-    try writer.bindNs(null, "http://example.com/ex4");
+    try writer.bindNs("", "http://example.com/ex4");
     try writer.elementEndEmpty();
     try writer.elementEnd();
     try writer.eof();
