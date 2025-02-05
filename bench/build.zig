@@ -56,11 +56,14 @@ pub fn build(b: *Build) !void {
 }
 
 fn addBench(b: *Build, name: []const u8) *Step.Compile {
-    const exe = b.addExecutable(.{
-        .name = name,
+    const mod = b.createModule(.{
         .root_source_file = b.path(b.fmt("src/{s}.zig", .{name})),
         .target = b.graph.host,
         .optimize = .ReleaseFast,
+    });
+    const exe = b.addExecutable(.{
+        .name = name,
+        .root_module = mod,
     });
     b.installArtifact(exe);
     return exe;
