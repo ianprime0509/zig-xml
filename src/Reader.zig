@@ -2196,10 +2196,10 @@ fn shift(reader: *Reader) !void {
     if (reader.node == .element_end) {
         if (reader.options.namespace_aware) {
             var prefix_bindings = reader.ns_prefixes.pop();
-            prefix_bindings.deinit(reader.gpa);
+            prefix_bindings.?.deinit(reader.gpa);
         }
         const element_name_start = reader.element_names.pop();
-        reader.strings.shrinkRetainingCapacity(@intFromEnum(element_name_start));
+        reader.strings.shrinkRetainingCapacity(@intFromEnum(element_name_start.?));
     }
 }
 
