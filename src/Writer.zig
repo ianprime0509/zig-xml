@@ -362,13 +362,13 @@ pub fn elementEnd(writer: *Writer) anyerror!void {
         .start, .after_bom, .after_xml_declaration, .end, .eof => unreachable,
     }
     try writer.write("</");
-    try writer.write(writer.string(name));
+    try writer.write(writer.string(name.?));
     try writer.write(">");
     writer.state = if (writer.element_names.items.len > 0) .after_structure_end else .end;
-    writer.strings.shrinkRetainingCapacity(@intFromEnum(name));
+    writer.strings.shrinkRetainingCapacity(@intFromEnum(name.?));
     if (writer.options.namespace_aware) {
         var ns_prefixes = writer.ns_prefixes.pop();
-        ns_prefixes.deinit(writer.gpa);
+        ns_prefixes.?.deinit(writer.gpa);
         writer.pending_ns.clearRetainingCapacity();
     }
 }
