@@ -85,6 +85,9 @@ pub const predefined_namespace_prefixes = std.StaticStringMap([]const u8).initCo
 
 pub const Reader = @import("Reader.zig");
 
+/// A thin wrapper around a `Reader` which guarantees that the underlying
+/// `Reader.Source` will return only errors in `SourceError`, allowing the
+/// reader functions to be exposed with more precise error sets.
 pub fn GenericReader(comptime SourceError: type) type {
     return struct {
         reader: Reader,
@@ -312,6 +315,7 @@ pub fn GenericReader(comptime SourceError: type) type {
     };
 }
 
+/// A UTF-8-encoded XML document stored entirely in memory.
 pub const StaticDocument = struct {
     data: []const u8,
     pos: usize,
@@ -330,6 +334,7 @@ pub const StaticDocument = struct {
         return .{
             .context = doc,
             .moveFn = &move,
+            .checkEncodingFn = &checkEncodingUtf8,
         };
     }
 
@@ -341,9 +346,50 @@ pub const StaticDocument = struct {
     }
 };
 
+test StaticDocument {
+    var doc: StaticDocument = .init(
+        \\<?xml version="1.0"?>
+        \\<root>Hello, 世界 👋!</root>
+        \\
+    );
+    var reader = doc.reader(std.testing.allocator, .{});
+    defer reader.deinit();
+
+    try expectEqual(.xml_declaration, try reader.read());
+    try expectEqualStrings("1.0", reader.xmlDeclarationVersion());
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.text, try reader.read());
+    try expectEqualStrings("Hello, 世界 👋!", reader.textRaw());
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.eof, try reader.read());
+}
+
+/// An XML document streamed from a `std.io.GenericReader`. The document content
+/// may be encoded using UTF-8 or UTF-16.
+///
+/// See `streamingDocument` for a simple way to create a `StreamingDocument` from
+/// an existing generic reader.
 pub fn StreamingDocument(comptime ReaderType: type) type {
     return struct {
         stream: ReaderType,
+        state: enum {
+            start,
+            utf8,
+            utf16be,
+            utf16le,
+        },
+
+        read: [4096]u8,
+        read_len: usize,
+        transcode_buf: [3]u8,
+        transcode_buf_len: u2,
+
         buf: []u8,
         pos: usize,
         avail: usize,
@@ -354,6 +400,13 @@ pub fn StreamingDocument(comptime ReaderType: type) type {
         pub fn init(gpa: Allocator, stream: ReaderType) @This() {
             return .{
                 .stream = stream,
+                .state = .start,
+
+                .read = undefined,
+                .read_len = 0,
+                .transcode_buf = undefined,
+                .transcode_buf_len = 0,
+
                 .buf = &.{},
                 .pos = 0,
                 .avail = 0,
@@ -374,6 +427,7 @@ pub fn StreamingDocument(comptime ReaderType: type) type {
             return .{
                 .context = doc,
                 .moveFn = &move,
+                .checkEncodingFn = &checkEncoding,
             };
         }
 
@@ -399,7 +453,112 @@ pub fn StreamingDocument(comptime ReaderType: type) type {
                 const new_buf_len = @max(min_buf_len, std.math.ceilPowerOfTwoAssert(usize, target_len));
                 doc.buf = try doc.gpa.realloc(doc.buf, new_buf_len);
             }
-            doc.avail += try doc.stream.readAll(doc.buf[doc.avail..]);
+            read: switch (doc.state) {
+                .start => {
+                    doc.read_len = try doc.stream.readAll(&doc.read);
+                    if (std.mem.startsWith(u8, doc.read[0..doc.read_len], "\xFE\xFF")) {
+                        doc.state = .utf16be;
+                    } else if (std.mem.startsWith(u8, doc.read[0..doc.read_len], "\xFF\xFE")) {
+                        doc.state = .utf16le;
+                    } else {
+                        doc.state = .utf8;
+                        // Since doc.read.len == min_buf_len, we know we can copy
+                        // all of the read buffer into the document buffer.
+                        @memcpy(doc.buf[0..doc.read_len], doc.read[0..doc.read_len]);
+                        doc.avail += doc.read_len;
+                    }
+                    continue :read doc.state;
+                },
+                .utf8 => {
+                    doc.avail += try doc.stream.readAll(doc.buf[doc.avail..]);
+                },
+                .utf16be, .utf16le => {
+                    const endian: std.builtin.Endian = if (doc.state == .utf16be) .big else .little;
+                    while (doc.avail < doc.buf.len) {
+                        const read = try doc.stream.readAll(doc.read[doc.read_len..]);
+                        if (read == 0 and doc.transcode_buf_len == 0 and doc.read_len == 0) break;
+                        doc.read_len += read;
+                        doc.transcodeUtf16(endian);
+                    }
+                },
+            }
+        }
+
+        /// Transcodes UTF-16 from the read buffer into UTF-8 in the document
+        /// buffer. Invalid UTF-16 is transcoded to invalid UTF-8.
+        fn transcodeUtf16(doc: *@This(), endian: std.builtin.Endian) void {
+            if (doc.transcode_buf_len > 0) {
+                const can_copy = @min(doc.transcode_buf_len, doc.buf.len - doc.avail);
+                @memcpy(doc.buf[doc.avail..][0..can_copy], doc.transcode_buf[0..can_copy]);
+                std.mem.copyForwards(u8, &doc.transcode_buf, doc.transcode_buf[can_copy..]);
+                doc.transcode_buf_len -= can_copy;
+            }
+
+            var read_pos: usize = 0;
+            while (doc.avail < doc.buf.len and read_pos < doc.read_len) {
+                const cp: u21, const src_len: usize = next_cp: {
+                    if (read_pos + 1 == doc.read_len) {
+                        // Odd number of bytes in UTF-16 input.
+                        // We know this is the end of the document, since the
+                        // read buffer has an even length, and we always attempt
+                        // to fill the read buffer as much as possible on every
+                        // read. Hence, a mismatched high surrogate will work to
+                        // produce invalid UTF-8.
+                        break :next_cp .{ 0xD800 + @as(u16, doc.read[read_pos]), 1 };
+                    }
+                    const u = std.mem.readInt(u16, doc.read[read_pos..][0..2], endian);
+                    if (std.unicode.utf16IsHighSurrogate(u)) {
+                        // High surrogate
+                        if (read_pos + 4 > doc.read_len) {
+                            // We might have more input; try reading more.
+                            if (doc.read_len == doc.read.len) break;
+                            // Otherwise, this is just an unpaired surrogate.
+                            break :next_cp .{ u, 2 };
+                        }
+                        const low = std.mem.readInt(u16, doc.read[read_pos + 2 ..][0..2], endian);
+                        if (std.unicode.utf16DecodeSurrogatePair(&.{ u, low })) |cp| {
+                            break :next_cp .{ cp, 4 };
+                        } else |_| {
+                            break :next_cp .{ u, 2 };
+                        }
+                    } else {
+                        break :next_cp .{ u, 2 };
+                    }
+                };
+
+                read_pos += src_len;
+                // No error is possible since the codepoint was decoded from
+                // UTF-16, so it can't be too large (and utf8CodepointSequenceLength
+                // doesn't check for unpaired surrogates).
+                const enc_len = std.unicode.utf8CodepointSequenceLength(cp) catch unreachable;
+                if (doc.avail + enc_len <= doc.buf.len) {
+                    // Happy path: encode directly into the available buffer.
+                    _ = std.unicode.wtf8Encode(cp, doc.buf[doc.avail..]) catch unreachable;
+                    doc.avail += enc_len;
+                } else {
+                    // Encode into a temporary buffer and keep what we can't
+                    // encode in the transcode buffer.
+                    const can_encode = doc.buf.len - doc.avail;
+                    var buf: [4]u8 = undefined;
+                    _ = std.unicode.wtf8Encode(cp, &buf) catch unreachable;
+                    @memcpy(doc.buf[doc.avail..][0..can_encode], buf[0..can_encode]);
+                    doc.avail += can_encode;
+                    const must_store = enc_len - can_encode;
+                    @memcpy(doc.transcode_buf[0..must_store], buf[can_encode..][0..must_store]);
+                    doc.transcode_buf_len = @intCast(must_store);
+                }
+            }
+            std.mem.copyForwards(u8, &doc.read, doc.read[read_pos..]);
+            doc.read_len -= read_pos;
+        }
+
+        fn checkEncoding(context: *const anyopaque, encoding: []const u8) bool {
+            const doc: *const @This() = @alignCast(@ptrCast(context));
+            return switch (doc.state) {
+                .start => unreachable, // Can't check encoding before reading anything.
+                .utf8 => std.ascii.eqlIgnoreCase(encoding, "UTF-8"),
+                .utf16be, .utf16le => std.ascii.eqlIgnoreCase(encoding, "UTF-16"),
+            };
         }
     };
 }
@@ -411,7 +570,7 @@ pub fn streamingDocument(gpa: Allocator, reader: anytype) StreamingDocument(@Typ
 test streamingDocument {
     var fbs = std.io.fixedBufferStream(
         \\<?xml version="1.0"?>
-        \\<root>Hello, world!</root>
+        \\<root>Hello, 世界 👋!</root>
         \\
     );
     var doc = xml.streamingDocument(std.testing.allocator, fbs.reader());
@@ -426,12 +585,56 @@ test streamingDocument {
     try expectEqualStrings("root", reader.elementName());
 
     try expectEqual(.text, try reader.read());
-    try expectEqualStrings("Hello, world!", reader.textRaw());
+    try expectEqualStrings("Hello, 世界 👋!", reader.textRaw());
 
     try expectEqual(.element_end, try reader.read());
     try expectEqualStrings("root", reader.elementName());
 
     try expectEqual(.eof, try reader.read());
+}
+
+test "streamingDocument with UTF-16BE" {
+    try testStreamingDocumentUtf16(.big);
+}
+
+test "streamingDocument with UTF-16LE" {
+    try testStreamingDocumentUtf16(.little);
+}
+
+fn testStreamingDocumentUtf16(comptime endian: std.builtin.Endian) !void {
+    var fbs = std.io.fixedBufferStream(utf16BytesLiteral(endian, "\u{FEFF}" ++
+        \\<?xml version="1.0"?>
+        \\<root>Hello, 世界 👋!</root>
+        \\
+    ));
+    var doc = xml.streamingDocument(std.testing.allocator, fbs.reader());
+    defer doc.deinit();
+    var reader = doc.reader(std.testing.allocator, .{});
+    defer reader.deinit();
+
+    try expectEqual(.xml_declaration, try reader.read());
+    try expectEqualStrings("1.0", reader.xmlDeclarationVersion());
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.text, try reader.read());
+    try expectEqualStrings("Hello, 世界 👋!", reader.textRaw());
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.eof, try reader.read());
+}
+
+inline fn utf16BytesLiteral(comptime endian: std.builtin.Endian, comptime utf8: []const u8) []const u8 {
+    const utf16 = std.unicode.utf8ToUtf16LeStringLiteral(utf8);
+    var utf16_bytes: [utf16.len * 2]u8 = undefined;
+    for (utf16, 0..) |cu, i| {
+        std.mem.writeInt(u16, utf16_bytes[i * 2 ..][0..2], cu, endian);
+    }
+    const utf16_bytes_final = utf16_bytes;
+    return &utf16_bytes_final;
 }
 
 test "streamingDocument with extremely long element name" {
@@ -449,6 +652,11 @@ test "streamingDocument with extremely long element name" {
     try expectEqualStrings(name, reader.elementName());
 
     try expectEqual(.eof, try reader.read());
+}
+
+fn checkEncodingUtf8(context: *const anyopaque, encoding: []const u8) bool {
+    _ = context;
+    return std.ascii.eqlIgnoreCase(encoding, "UTF-8");
 }
 
 pub const Writer = @import("Writer.zig");

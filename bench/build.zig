@@ -9,6 +9,10 @@ pub fn build(b: *Build) !void {
     bench_reader.root_module.addImport("xml", xml);
     bench_reader.linkLibC();
 
+    const bench_streaming_reader = addBench(b, "streaming_reader");
+    bench_streaming_reader.root_module.addImport("xml", xml);
+    bench_streaming_reader.linkLibC();
+
     const libxml2 = b.dependency("libxml2", .{
         .optimize = .ReleaseFast,
     });

@@ -13,7 +13,9 @@ export fn zig_fuzz_test(buf: [*]u8, len: isize) void {
 }
 
 fn fuzz(gpa: Allocator, input: []const u8) !void {
-    var doc = xml.StaticDocument.init(input);
+    var fbs = std.io.fixedBufferStream(input);
+    var doc = xml.streamingDocument(gpa, fbs.reader());
+    defer doc.deinit();
     var reader = doc.reader(gpa, .{});
     defer reader.deinit();
 
