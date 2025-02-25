@@ -349,7 +349,7 @@ fn elementStartInternal(writer: *Writer, prefix: []const u8, local: []const u8) 
 /// Ends the currently open element.
 /// Asserts that the writer is inside an element.
 pub fn elementEnd(writer: *Writer) anyerror!void {
-    const name = writer.element_names.pop();
+    const name = @as(?StringIndex, writer.element_names.pop()).?;
     switch (writer.state) {
         .text => {},
         .element_start => {
@@ -367,7 +367,7 @@ pub fn elementEnd(writer: *Writer) anyerror!void {
     writer.state = if (writer.element_names.items.len > 0) .after_structure_end else .end;
     writer.strings.shrinkRetainingCapacity(@intFromEnum(name));
     if (writer.options.namespace_aware) {
-        var ns_prefixes = writer.ns_prefixes.pop();
+        var ns_prefixes = @as(?std.AutoArrayHashMapUnmanaged(StringIndex, StringIndex), writer.ns_prefixes.pop()).?;
         ns_prefixes.deinit(writer.gpa);
         writer.pending_ns.clearRetainingCapacity();
     }
@@ -543,7 +543,7 @@ fn attributeInternal(writer: *Writer, prefix: []const u8, name: []const u8, valu
     try writer.write(" ");
     if (prefix.len > 0) {
         try writer.write(prefix);
-        if(name.len > 0) {
+        if (name.len > 0) {
             try writer.write(":");
         }
     }
