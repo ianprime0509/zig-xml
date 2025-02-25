@@ -12,7 +12,7 @@ The library aims to confirm with the following standards:
 - [XML 1.0 Fifth Edition](https://www.w3.org/TR/2008/REC-xml-20081126/)
 - [XML Namespaces 1.0 Third Edition](https://www.w3.org/TR/2009/REC-xml-names-20091208/)
 
-Currently, DTDs (DOCTYPE) are not supported, nor is any non-UTF-8 encoding.
+Currently, DTDs (DOCTYPE) are not supported.
 
 Other standards (such as XML 1.1 or XML 1.0 prior to the fifth edition) are only
 supported insofar as they are compatible with the above standards.
