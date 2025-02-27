@@ -139,7 +139,9 @@ fn runFile(gpa: Allocator, path: []const u8, results: *Results) !void {
     defer dir.close();
     const data = try dir.readFileAlloc(gpa, std.fs.path.basename(path), max_file_size);
     defer gpa.free(data);
-    var doc = xml.StaticDocument.init(data);
+    var fbs = std.io.fixedBufferStream(data);
+    var doc = xml.streamingDocument(gpa, fbs.reader());
+    defer doc.deinit();
     var reader = doc.reader(gpa, .{});
     defer reader.deinit();
 
@@ -214,12 +216,6 @@ fn runTest(gpa: Allocator, dir: std.fs.Dir, reader: *xml.Reader, results: *Resul
     defer if (output) |o| gpa.free(o);
     try reader.skipElement();
 
-    if (std.mem.startsWith(u8, input, "\xFE\xFF") or
-        std.mem.startsWith(u8, input, "\xFF\xFE"))
-    {
-        return results.skip(id, "UTF-16 unsupported", .{});
-    }
-
     const options: TestOptions = .{
         .namespace = namespace == .yes,
     };
@@ -242,7 +238,9 @@ fn runTestParseable(
     options: TestOptions,
     results: *Results,
 ) !void {
-    var doc = xml.StaticDocument.init(input);
+    var fbs = std.io.fixedBufferStream(input);
+    var doc = xml.streamingDocument(gpa, fbs.reader());
+    defer doc.deinit();
     var reader = doc.reader(gpa, .{
         .namespace_aware = options.namespace,
     });
@@ -329,7 +327,9 @@ fn runTestUnparseable(
     options: TestOptions,
     results: *Results,
 ) !void {
-    var doc = xml.StaticDocument.init(input);
+    var fbs = std.io.fixedBufferStream(input);
+    var doc = xml.streamingDocument(gpa, fbs.reader());
+    defer doc.deinit();
     var reader = doc.reader(gpa, .{
         .namespace_aware = options.namespace,
     });
