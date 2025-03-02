@@ -1,6 +1,7 @@
 .{
-    .name = "xmlconf",
+    .name = .xmlconf,
     .version = "0.0.0",
+    .fingerprint = 0x9ff4914e2b429b9b, // Changing this has security and trust implications.
     .paths = .{
         "build.zig",
         "build.zig.zon",
