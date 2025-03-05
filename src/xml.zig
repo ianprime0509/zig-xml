@@ -396,10 +396,10 @@ pub fn StreamingDocument(comptime ReaderType: type) type {
 
         fn fillBuffer(doc: *@This(), target_len: usize) !void {
             if (target_len > doc.buf.len) {
-                const new_buf_len = @min(min_buf_len, std.math.ceilPowerOfTwoAssert(usize, target_len));
+                const new_buf_len = @max(min_buf_len, std.math.ceilPowerOfTwoAssert(usize, target_len));
                 doc.buf = try doc.gpa.realloc(doc.buf, new_buf_len);
             }
-            doc.avail += try doc.stream.read(doc.buf[doc.avail..]);
+            doc.avail += try doc.stream.readAll(doc.buf[doc.avail..]);
         }
     };
 }
@@ -430,6 +430,23 @@ test streamingDocument {
 
     try expectEqual(.element_end, try reader.read());
     try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.eof, try reader.read());
+}
+
+test "streamingDocument with extremely long element name" {
+    const name = "a" ** 65536;
+    var fbs = std.io.fixedBufferStream("<" ++ name ++ "/>");
+    var doc = xml.streamingDocument(std.testing.allocator, fbs.reader());
+    defer doc.deinit();
+    var reader = doc.reader(std.testing.allocator, .{});
+    defer reader.deinit();
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings(name, reader.elementName());
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings(name, reader.elementName());
 
     try expectEqual(.eof, try reader.read());
 }
