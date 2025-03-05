@@ -23,7 +23,14 @@ pub fn build(b: *std.Build) void {
         .root_module = afl_mod,
     });
 
-    const afl_exe = afl.addInstrumentedExe(b, target, .Debug, afl_obj);
+    const afl_exe = afl.addInstrumentedExe(
+        b,
+        target,
+        .Debug,
+        b.option([]const []const u8, "llvm-config-path", "Path to find llvm-config executable"),
+        b.systemIntegrationOption("aflplusplus", .{}),
+        afl_obj,
+    ) orelse return;
     const afl_exe_install = b.addInstallBinFile(afl_exe, "fuzz-xml");
     b.getInstallStep().dependOn(&afl_exe_install.step);
 }
