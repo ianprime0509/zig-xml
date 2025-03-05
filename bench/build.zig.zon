@@ -1,7 +1,8 @@
 .{
-    .name = .bench,
+    .name = .xml_bench,
     .version = "0.0.0",
     .fingerprint = 0x66d8e325d5328f67, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.14.0",
     .paths = .{
         "src",
         "lib",

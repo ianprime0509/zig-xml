@@ -2,6 +2,7 @@
     .name = .xmlconf,
     .version = "0.0.0",
     .fingerprint = 0x9ff4914e2b429b9b, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.14.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
