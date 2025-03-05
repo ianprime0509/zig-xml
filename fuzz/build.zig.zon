@@ -1,7 +1,7 @@
 .{
     .name = .xml_fuzz,
     .version = "0.0.0",
-    .fingerprint = 0x833d42698a8ef53, // Changing this has security and trust implications.
+    .fingerprint = 0x1cf4e46856f3630b, // Changing this has security and trust implications.
     .minimum_zig_version = "0.14.0",
     .paths = .{
         "build.zig",
