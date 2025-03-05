@@ -1,5 +1,5 @@
 const std = @import("std");
-const afl = @import("zig-afl-kit");
+const afl = @import("zig_afl_kit");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
