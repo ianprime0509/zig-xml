@@ -1,6 +1,7 @@
 .{
-    .name = "xml_fuzz",
+    .name = .fuzz,
     .version = "0.0.0",
+    .fingerprint = 0x833d42698a8ef53, // Changing this has security and trust implications.
     .paths = .{
         "build.zig",
         "build.zig.zon",
