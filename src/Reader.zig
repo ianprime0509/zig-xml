@@ -174,16 +174,33 @@ pub const ErrorCode = enum {
     expected_equals,
     expected_quote,
     missing_end_quote,
-    invalid_utf8,
+    invalid_encoding,
     illegal_character,
 };
 
+/// A forward-only sliding window of a UTF-8-encoded XML document.
 pub const Source = struct {
     context: *const anyopaque,
+    /// Moves the start of the window forward by `advance` bytes and sets the
+    /// length of the window from the new starting position to `len` bytes, or
+    /// until the end of the document if it contains fewer than `len` bytes from
+    /// the starting position. Returns a slice of the underlying UTF-8 document
+    /// content in the window.
+    ///
+    /// The new start of the window must not exceed the document's length.
     moveFn: *const fn (context: *const anyopaque, advance: usize, len: usize) anyerror![]const u8,
+    /// Returns whether `encoding` is a supported value for the encoding in the
+    /// XML declaration.
+    ///
+    /// At least one call to `moveFn` must be made before calling this function.
+    checkEncodingFn: *const fn (context: *const anyopaque, encoding: []const u8) bool,
 
     pub fn move(source: Source, advance: usize, len: usize) anyerror![]const u8 {
         return source.moveFn(source.context, advance, len);
+    }
+
+    pub fn checkEncoding(source: Source, encoding: []const u8) bool {
+        return source.checkEncodingFn(source.context, encoding);
     }
 };
 
@@ -1593,7 +1610,7 @@ fn checkXmlVersion(reader: *Reader, version: []const u8, n_attr: usize) !void {
 }
 
 fn checkXmlEncoding(reader: *Reader, encoding: []const u8, n_attr: usize) !void {
-    if (!std.ascii.eqlIgnoreCase(encoding, "utf-8")) {
+    if (!reader.source.checkEncoding(encoding)) {
         return reader.fatal(.xml_declaration_encoding_unsupported, reader.attributeValuePos(n_attr));
     }
 }
@@ -2177,7 +2194,7 @@ fn fatalInvalidUtf8(reader: *Reader, s: []const u8, pos: usize) error{MalformedX
         if (!std.unicode.utf8ValidateSlice(s[invalid_pos..][0..cp_len])) break;
         invalid_pos += cp_len;
     }
-    return reader.fatal(.invalid_utf8, pos + invalid_pos);
+    return reader.fatal(.invalid_encoding, pos + invalid_pos);
 }
 
 const base_read_size = 4096;
