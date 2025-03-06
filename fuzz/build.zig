@@ -1,5 +1,5 @@
 const std = @import("std");
-const afl = @import("zig-afl-kit");
+const afl = @import("zig_afl_kit");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -9,16 +9,19 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
 
-    const afl_obj = b.addObject(.{
-        .name = "fuzz-xml",
+    const afl_mod = b.createModule(.{
         .root_source_file = b.path("src/fuzz.zig"),
         .target = target,
         .optimize = .Debug,
+        .stack_check = false,
+        .link_libc = true,
+        .fuzz = true,
     });
-    afl_obj.root_module.stack_check = false;
-    afl_obj.root_module.link_libc = true;
-    if (@hasField(std.Build.Module, "fuzz")) afl_obj.root_module.fuzz = true;
-    afl_obj.root_module.addImport("xml", xml.module("xml"));
+    afl_mod.addImport("xml", xml.module("xml"));
+    const afl_obj = b.addObject(.{
+        .name = "fuzz-xml",
+        .root_module = afl_mod,
+    });
 
     const afl_exe = afl.addInstrumentedExe(
         b,

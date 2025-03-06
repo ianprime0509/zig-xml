@@ -367,7 +367,7 @@ pub fn elementEnd(writer: *Writer) anyerror!void {
     writer.state = if (writer.element_names.items.len > 0) .after_structure_end else .end;
     writer.strings.shrinkRetainingCapacity(@intFromEnum(name));
     if (writer.options.namespace_aware) {
-        var ns_prefixes = @as(?std.AutoArrayHashMapUnmanaged(StringIndex, StringIndex), writer.ns_prefixes.pop()).?;
+        var ns_prefixes = writer.ns_prefixes.pop().?;
         ns_prefixes.deinit(writer.gpa);
         writer.pending_ns.clearRetainingCapacity();
     }

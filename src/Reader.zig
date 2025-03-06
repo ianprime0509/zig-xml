@@ -1225,143 +1225,141 @@ pub const ReadError = error{MalformedXml} || Allocator.Error;
 /// Reads and returns the next node in the document.
 pub fn read(reader: *Reader) anyerror!Node {
     errdefer reader.node = null;
-    const node: Node = while (true) {
-        switch (reader.state) {
-            .invalid => return error.MalformedXml,
-            .start => {
-                try reader.shift();
-                try reader.skipBom();
-                if (try reader.readMatch("<?")) {
-                    try reader.readName();
-                    if (std.mem.eql(u8, reader.piTargetUnchecked(), "xml")) {
-                        try reader.readXmlDeclarationContent();
-                        reader.state = .after_xml_declaration;
-                        try reader.checkXmlDeclaration();
-                        break .xml_declaration;
-                    } else {
-                        try reader.readPiContent();
-                        reader.state = .after_xml_declaration;
-                        try reader.checkPi();
-                        break .pi;
-                    }
-                }
-                reader.state = .after_xml_declaration;
-                continue;
-            },
-            .after_xml_declaration => {
-                try reader.skipSpace();
-                if (try reader.readMatch("<?")) {
-                    try reader.readName();
-                    try reader.readPiContent();
-                    try reader.checkPi();
-                    break .pi;
-                } else if (try reader.readMatch("<!--")) {
-                    try reader.readCommentContent();
-                    try reader.checkComment();
-                    break .comment;
-                } else if (try reader.readMatch("<!DOCTYPE")) {
-                    return reader.fatal(.doctype_unsupported, reader.pos);
-                }
-                reader.state = .after_doctype;
-                continue;
-            },
-            .after_doctype => {
-                try reader.skipSpace();
-                if (reader.pos == reader.buf.len) {
-                    return reader.fatal(.unexpected_eof, reader.pos);
-                } else if (try reader.readMatch("<?")) {
-                    try reader.readName();
-                    try reader.readPiContent();
-                    try reader.checkPi();
-                    break .pi;
-                } else if (try reader.readMatch("<!--")) {
-                    try reader.readCommentContent();
-                    try reader.checkComment();
-                    break .comment;
-                } else if (try reader.readMatch("<")) {
-                    try reader.readName();
-                    reader.state = if (try reader.readElementStartContent()) .empty_root else .in_root;
-                    try reader.checkElementStart();
-                    break .element_start;
+    const node: Node = node: switch (reader.state) {
+        .invalid => return error.MalformedXml,
+        .start => {
+            try reader.shift();
+            try reader.skipBom();
+            if (try reader.readMatch("<?")) {
+                try reader.readName();
+                if (std.mem.eql(u8, reader.piTargetUnchecked(), "xml")) {
+                    try reader.readXmlDeclarationContent();
+                    reader.state = .after_xml_declaration;
+                    try reader.checkXmlDeclaration();
+                    break :node .xml_declaration;
                 } else {
-                    return reader.fatal(.unexpected_character, reader.pos);
-                }
-            },
-            .in_root => {
-                try reader.shift();
-                if (reader.pos == reader.buf.len) {
-                    return reader.fatal(.unexpected_eof, reader.pos);
-                } else if (try reader.readMatch("&#")) {
-                    try reader.readCharacterReference();
-                    if (!try reader.readMatch(";")) return reader.fatal(.character_reference_unclosed, reader.pos);
-                    try reader.checkCharacterReference();
-                    break .character_reference;
-                } else if (try reader.readMatch("&")) {
-                    try reader.readName();
-                    if (!try reader.readMatch(";")) return reader.fatal(.entity_reference_unclosed, reader.pos);
-                    try reader.checkEntityReference();
-                    break .entity_reference;
-                } else if (try reader.readMatch("<?")) {
-                    try reader.readName();
                     try reader.readPiContent();
+                    reader.state = .after_xml_declaration;
                     try reader.checkPi();
-                    break .pi;
-                } else if (try reader.readMatch("<!--")) {
-                    try reader.readCommentContent();
-                    try reader.checkComment();
-                    break .comment;
-                } else if (try reader.readMatch("<![CDATA[")) {
-                    try reader.readCdata();
-                    try reader.checkCdata();
-                    break .cdata;
-                } else if (try reader.readMatch("</")) {
-                    try reader.readName();
-                    try reader.readSpace();
-                    if (!try reader.readMatch(">")) return reader.fatal(.element_end_unclosed, reader.pos);
-                    try reader.checkElementEnd();
-                    if (reader.element_names.items.len == 1) reader.state = .after_root;
-                    break .element_end;
-                } else if (try reader.readMatch("<")) {
-                    try reader.readName();
-                    if (try reader.readElementStartContent()) {
-                        reader.state = .empty_element;
-                    }
-                    try reader.checkElementStart();
-                    break .element_start;
-                } else {
-                    try reader.readText();
-                    try reader.checkText();
-                    break .text;
+                    break :node .pi;
                 }
-            },
-            .empty_element => {
-                reader.state = .in_root;
-                break .element_end;
-            },
-            .empty_root => {
-                reader.state = .after_root;
-                break .element_end;
-            },
-            .after_root => {
-                try reader.skipSpace();
-                if (reader.pos == reader.buf.len) {
-                    reader.state = .eof;
-                    continue;
-                } else if (try reader.readMatch("<?")) {
-                    try reader.readName();
-                    try reader.readPiContent();
-                    try reader.checkPi();
-                    break .pi;
-                } else if (try reader.readMatch("<!--")) {
-                    try reader.readCommentContent();
-                    try reader.checkComment();
-                    break .comment;
-                } else {
-                    return reader.fatal(.unexpected_character, reader.pos);
+            }
+            reader.state = .after_xml_declaration;
+            continue :node reader.state;
+        },
+        .after_xml_declaration => {
+            try reader.skipSpace();
+            if (try reader.readMatch("<?")) {
+                try reader.readName();
+                try reader.readPiContent();
+                try reader.checkPi();
+                break :node .pi;
+            } else if (try reader.readMatch("<!--")) {
+                try reader.readCommentContent();
+                try reader.checkComment();
+                break :node .comment;
+            } else if (try reader.readMatch("<!DOCTYPE")) {
+                return reader.fatal(.doctype_unsupported, reader.pos);
+            }
+            reader.state = .after_doctype;
+            continue :node reader.state;
+        },
+        .after_doctype => {
+            try reader.skipSpace();
+            if (reader.pos == reader.buf.len) {
+                return reader.fatal(.unexpected_eof, reader.pos);
+            } else if (try reader.readMatch("<?")) {
+                try reader.readName();
+                try reader.readPiContent();
+                try reader.checkPi();
+                break :node .pi;
+            } else if (try reader.readMatch("<!--")) {
+                try reader.readCommentContent();
+                try reader.checkComment();
+                break :node .comment;
+            } else if (try reader.readMatch("<")) {
+                try reader.readName();
+                reader.state = if (try reader.readElementStartContent()) .empty_root else .in_root;
+                try reader.checkElementStart();
+                break :node .element_start;
+            } else {
+                return reader.fatal(.unexpected_character, reader.pos);
+            }
+        },
+        .in_root => {
+            try reader.shift();
+            if (reader.pos == reader.buf.len) {
+                return reader.fatal(.unexpected_eof, reader.pos);
+            } else if (try reader.readMatch("&#")) {
+                try reader.readCharacterReference();
+                if (!try reader.readMatch(";")) return reader.fatal(.character_reference_unclosed, reader.pos);
+                try reader.checkCharacterReference();
+                break :node .character_reference;
+            } else if (try reader.readMatch("&")) {
+                try reader.readName();
+                if (!try reader.readMatch(";")) return reader.fatal(.entity_reference_unclosed, reader.pos);
+                try reader.checkEntityReference();
+                break :node .entity_reference;
+            } else if (try reader.readMatch("<?")) {
+                try reader.readName();
+                try reader.readPiContent();
+                try reader.checkPi();
+                break :node .pi;
+            } else if (try reader.readMatch("<!--")) {
+                try reader.readCommentContent();
+                try reader.checkComment();
+                break :node .comment;
+            } else if (try reader.readMatch("<![CDATA[")) {
+                try reader.readCdata();
+                try reader.checkCdata();
+                break :node .cdata;
+            } else if (try reader.readMatch("</")) {
+                try reader.readName();
+                try reader.readSpace();
+                if (!try reader.readMatch(">")) return reader.fatal(.element_end_unclosed, reader.pos);
+                try reader.checkElementEnd();
+                if (reader.element_names.items.len == 1) reader.state = .after_root;
+                break :node .element_end;
+            } else if (try reader.readMatch("<")) {
+                try reader.readName();
+                if (try reader.readElementStartContent()) {
+                    reader.state = .empty_element;
                 }
-            },
-            .eof => break .eof,
-        }
+                try reader.checkElementStart();
+                break :node .element_start;
+            } else {
+                try reader.readText();
+                try reader.checkText();
+                break :node .text;
+            }
+        },
+        .empty_element => {
+            reader.state = .in_root;
+            break :node .element_end;
+        },
+        .empty_root => {
+            reader.state = .after_root;
+            break :node .element_end;
+        },
+        .after_root => {
+            try reader.skipSpace();
+            if (reader.pos == reader.buf.len) {
+                reader.state = .eof;
+                continue :node reader.state;
+            } else if (try reader.readMatch("<?")) {
+                try reader.readName();
+                try reader.readPiContent();
+                try reader.checkPi();
+                break :node .pi;
+            } else if (try reader.readMatch("<!--")) {
+                try reader.readCommentContent();
+                try reader.checkComment();
+                break :node .comment;
+            } else {
+                return reader.fatal(.unexpected_character, reader.pos);
+            }
+        },
+        .eof => .eof,
     };
     reader.node = node;
     return node;
@@ -2197,10 +2195,10 @@ fn shift(reader: *Reader) !void {
 
     if (reader.node == .element_end) {
         if (reader.options.namespace_aware) {
-            var prefix_bindings = @as(?std.AutoArrayHashMapUnmanaged(StringIndex, StringIndex), reader.ns_prefixes.pop()).?;
+            var prefix_bindings = reader.ns_prefixes.pop().?;
             prefix_bindings.deinit(reader.gpa);
         }
-        const element_name_start = @as(?StringIndex, reader.element_names.pop()).?;
+        const element_name_start = reader.element_names.pop().?;
         reader.strings.shrinkRetainingCapacity(@intFromEnum(element_name_start));
     }
 }

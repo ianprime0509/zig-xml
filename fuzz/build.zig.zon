@@ -1,6 +1,8 @@
 .{
-    .name = "xml_fuzz",
+    .name = .xml_fuzz,
     .version = "0.0.0",
+    .fingerprint = 0x1cf4e46856f3630b, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.14.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
@@ -10,9 +12,9 @@
         .xml = .{
             .path = "..",
         },
-        .@"zig-afl-kit" = .{
-            .url = "git+https://github.com/kristoff-it/zig-afl-kit?ref=main#ddcaaf36125bce8a89af38b58d8b9993626971d5",
-            .hash = "122065a5f839ca9174542c621a0311695b49db71b58b50b232891571902775405642",
+        .zig_afl_kit = .{
+            .url = "git+https://github.com/ianprime0509/zig-afl-kit?ref=zig-0.14.0#fab57026566b392e7164f51758539e025cbbd289",
+            .hash = "zig_afl_kit-0.1.0-mTByBG4dAABys9nGUtk2SE0j31-wKGb51j2YhEJILYx9",
         },
     },
 }

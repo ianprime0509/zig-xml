@@ -1,6 +1,8 @@
 .{
-    .name = "zig-xml-benchmarks",
+    .name = .xml_bench,
     .version = "0.0.0",
+    .fingerprint = 0xf7a84882b8ff81a4, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.14.0",
     .paths = .{
         "src",
         "lib",
@@ -13,17 +15,17 @@
         },
         .libxml2 = .{
             .url = "git+https://github.com/ianprime0509/zig-libxml2?ref=main#6cebb963e0ad5789825eb2333a4d21fab8f35a92",
-            .hash = "12200f672ceb8df0c715a7018e5c53ad434db17f900c620e6238f178cc9a9d80b88e",
+            .hash = "libxml2-2.12.6-0-AAAAANhXAAAPZyzrjfDHFacBjlxTrUNNsX-QDGIOYjjx",
         },
         .mxml = .{
             .url = "git+https://github.com/michaelrsweet/mxml.git#809204a3051607f54b57e2950f3a5520d79ae383",
-            .hash = "12203c3b2dbaf60323c904c186d164c9e80343f61dc112f60da9b05400a2deca0ad0",
+            .hash = "N-V-__8AANnGIgA8Oy269gMjyQTBhtFkyegDQ_YdwRL2Damw",
         },
         .yxml = .{
             // Upstream: https://g.blicky.net/yxml.git/
             // Upstream doesn't support Git protocol v2, so Zig cannot currently fetch it
             .url = "git+https://github.com/ianprime0509/yxml.git#66507906673bc6159d5d620414479954c9c21c24",
-            .hash = "1220bb6cf028997259ad3cc950810c5ead0bc0d5cde66915c37e88df613b93ffc4c7",
+            .hash = "N-V-__8AAAVVAQC7bPAomXJZrTzJUIEMXq0LwNXN5mkVw36I",
         },
     },
 }

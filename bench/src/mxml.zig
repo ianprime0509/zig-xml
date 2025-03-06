@@ -12,7 +12,7 @@ pub fn runBench(data: [:0]const u8) !void {
 
 var seen_root_node = false;
 
-fn callback(node: ?*c.mxml_node_t, event: c.mxml_sax_event_t, _: ?*anyopaque) callconv(.C) void {
+fn callback(node: ?*c.mxml_node_t, event: c.mxml_sax_event_t, _: ?*anyopaque) callconv(.c) void {
     if (!seen_root_node and event == c.MXML_SAX_ELEMENT_OPEN) {
         _ = c.mxmlRetain(node);
         seen_root_node = true;

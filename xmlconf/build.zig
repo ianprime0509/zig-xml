@@ -9,13 +9,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const xmlconf_exe = b.addExecutable(.{
-        .name = "xmlconf",
+    const xmlconf_mod = b.createModule(.{
         .root_source_file = b.path("src/xmlconf.zig"),
         .target = target,
         .optimize = optimize,
     });
-    xmlconf_exe.root_module.addImport("xml", xml.module("xml"));
+    xmlconf_mod.addImport("xml", xml.module("xml"));
+    const xmlconf_exe = b.addExecutable(.{
+        .name = "xmlconf",
+        .root_module = xmlconf_mod,
+    });
     b.installArtifact(xmlconf_exe);
 
     const xmlts = b.dependency("xmlts", .{});

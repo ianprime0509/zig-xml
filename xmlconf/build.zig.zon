@@ -1,6 +1,8 @@
 .{
-    .name = "xmlconf",
+    .name = .xmlconf,
     .version = "0.0.0",
+    .fingerprint = 0x9ff4914e2b429b9b, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.14.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
@@ -12,7 +14,7 @@
         },
         .xmlts = .{
             .url = "https://www.w3.org/XML/Test/xmlts20130923.tar.gz",
-            .hash = "1220322f729089d5371fce0b0777edb9946cc54a389aa372c879d9c0843d862c4bbe",
+            .hash = "N-V-__8AAKKMKQAyL3KQidU3H84LB3ftuZRsxUo4mqNyyHnZ",
         },
     },
 }
