@@ -12,7 +12,7 @@ The library aims to confirm with the following standards:
 - [XML 1.0 Fifth Edition](https://www.w3.org/TR/2008/REC-xml-20081126/)
 - [XML Namespaces 1.0 Third Edition](https://www.w3.org/TR/2009/REC-xml-names-20091208/)
 
-Currently, DTDs (DOCTYPE) are not supported, nor is any non-UTF-8 encoding.
+Currently, DTDs (DOCTYPE) are not supported.
 
 Other standards (such as XML 1.1 or XML 1.0 prior to the fifth edition) are only
 supported insofar as they are compatible with the above standards.
@@ -37,6 +37,12 @@ pass, and 924 are skipped due to unsupported features.
 
 There is a fuzzing sub-project in the `fuzz` directory using
 https://github.com/kristoff-it/zig-afl-kit.
+
+Recommended fuzzing command:
+
+```sh
+afl-fuzz -x dictionaries/xml.dict -x dictionaries/xml_UTF_16.dict -x dictionaries/xml_UTF_16BE.dict -x dictionaries/xml_UTF_16LE.dict -i inputs -o outputs zig-out/bin/fuzz-xml
+```
 
 ## License
 
