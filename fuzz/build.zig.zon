@@ -12,9 +12,9 @@
         .xml = .{
             .path = "..",
         },
-        .zig_afl_kit = .{
-            .url = "git+https://github.com/ianprime0509/zig-afl-kit?ref=zig-0.14.0#fab57026566b392e7164f51758539e025cbbd289",
-            .hash = "zig_afl_kit-0.1.0-mTByBG4dAABys9nGUtk2SE0j31-wKGb51j2YhEJILYx9",
+        .afl_kit = .{
+            .url = "git+https://github.com/kristoff-it/zig-afl-kit?ref=main#8ef04d1db48650345dca68da1e1b8f2615125c40",
+            .hash = "afl_kit-0.1.0-NdJ3cvscAACLEvjZTB017IAks_Uq5ux1qpA-klDe384Y",
         },
     },
 }

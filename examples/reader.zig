@@ -3,7 +3,7 @@ const log = std.log;
 const xml = @import("xml");
 
 pub fn main() !void {
-    var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    var gpa_state: std.heap.DebugAllocator(.{}) = .{};
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 
@@ -15,20 +15,20 @@ pub fn main() !void {
 
     var input_file = try std.fs.cwd().openFile(args[1], .{});
     defer input_file.close();
-    // It is not necessary to wrap the input in a BufferedReader. The streaming
-    // document uses an internal buffer and reads its input in chunks, not byte
-    // by byte.
-    var doc = xml.streamingDocument(gpa, input_file.reader());
-    defer doc.deinit();
-    var reader = doc.reader(gpa, .{});
-    defer reader.deinit();
+    var input_buf: [4096]u8 = undefined;
+    var input_reader = input_file.reader(&input_buf);
+    var streaming_reader: xml.Reader.Streaming = .init(gpa, &input_reader.interface, .{});
+    defer streaming_reader.deinit();
+    const reader = &streaming_reader.interface;
 
-    var stdout_buf = std.io.bufferedWriter(std.io.getStdOut().writer());
-    const stdout = stdout_buf.writer();
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    const stdout = &stdout_writer.interface;
 
     while (true) {
         const node = reader.read() catch |err| switch (err) {
             error.MalformedXml => {
+                try stdout.flush();
                 const loc = reader.errorLocation();
                 log.err("{}:{}: {}", .{ loc.line, loc.column, reader.errorCode() });
                 return error.MalformedXml;
@@ -46,65 +46,65 @@ pub fn main() !void {
             },
             .element_start => {
                 const element_name = reader.elementNameNs();
-                try stdout.print("element_start: \"{}\"[\"{}\"]:\"{}\"\n", .{
-                    std.zig.fmtEscapes(element_name.prefix),
-                    std.zig.fmtEscapes(element_name.ns),
-                    std.zig.fmtEscapes(element_name.local),
+                try stdout.print("element_start: \"{f}\"[\"{f}\"]:\"{f}\"\n", .{
+                    std.zig.fmtString(element_name.prefix),
+                    std.zig.fmtString(element_name.ns),
+                    std.zig.fmtString(element_name.local),
                 });
-                for (0..reader.reader.attributeCount()) |i| {
+                for (0..reader.attributeCount()) |i| {
                     const attribute_name = reader.attributeNameNs(i);
-                    try stdout.print("  attribute: \"{}\"[\"{}\"]:\"{}\" = \"{}\"\n", .{
-                        std.zig.fmtEscapes(attribute_name.prefix),
-                        std.zig.fmtEscapes(attribute_name.ns),
-                        std.zig.fmtEscapes(attribute_name.local),
-                        std.zig.fmtEscapes(try reader.attributeValue(i)),
+                    try stdout.print("  attribute: \"{f}\"[\"{f}\"]:\"{f}\" = \"{f}\"\n", .{
+                        std.zig.fmtString(attribute_name.prefix),
+                        std.zig.fmtString(attribute_name.ns),
+                        std.zig.fmtString(attribute_name.local),
+                        std.zig.fmtString(try reader.attributeValue(i)),
                     });
                 }
             },
             .element_end => {
                 const element_name = reader.elementNameNs();
-                try stdout.print("element_end: \"{}\"[\"{}\"]:\"{}\"\n", .{
-                    std.zig.fmtEscapes(element_name.prefix),
-                    std.zig.fmtEscapes(element_name.ns),
-                    std.zig.fmtEscapes(element_name.local),
+                try stdout.print("element_end: \"{f}\"[\"{f}\"]:\"{f}\"\n", .{
+                    std.zig.fmtString(element_name.prefix),
+                    std.zig.fmtString(element_name.ns),
+                    std.zig.fmtString(element_name.local),
                 });
             },
             .comment => {
-                try stdout.print("comment: \"{}\"\n", .{
-                    std.zig.fmtEscapes(try reader.comment()),
+                try stdout.print("comment: \"{f}\"\n", .{
+                    std.zig.fmtString(try reader.comment()),
                 });
             },
             .pi => {
-                try stdout.print("pi: \"{}\" \"{}\"\n", .{
-                    std.zig.fmtEscapes(reader.piTarget()),
-                    std.zig.fmtEscapes(try reader.piData()),
+                try stdout.print("pi: \"{f}\" \"{f}\"\n", .{
+                    std.zig.fmtString(reader.piTarget()),
+                    std.zig.fmtString(try reader.piData()),
                 });
             },
             .text => {
-                try stdout.print("text: \"{}\"\n", .{
-                    std.zig.fmtEscapes(try reader.text()),
+                try stdout.print("text: \"{f}\"\n", .{
+                    std.zig.fmtString(try reader.text()),
                 });
             },
             .cdata => {
-                try stdout.print("cdata: \"{}\"\n", .{
-                    std.zig.fmtEscapes(try reader.cdata()),
+                try stdout.print("cdata: \"{f}\"\n", .{
+                    std.zig.fmtString(try reader.cdata()),
                 });
             },
             .entity_reference => {
-                try stdout.print("entity_reference: \"{}\"\n", .{
-                    std.zig.fmtEscapes(reader.entityReferenceName()),
+                try stdout.print("entity_reference: \"{f}\"\n", .{
+                    std.zig.fmtString(reader.entityReferenceName()),
                 });
             },
             .character_reference => {
                 var buf: [4]u8 = undefined;
                 const len = std.unicode.utf8Encode(reader.characterReferenceChar(), &buf) catch unreachable;
-                try stdout.print("character_reference: {} ('{'}')\n", .{
+                try stdout.print("character_reference: {} (\"{f}\")\n", .{
                     reader.characterReferenceChar(),
-                    std.zig.fmtEscapes(buf[0..len]),
+                    std.zig.fmtString(buf[0..len]),
                 });
             },
         }
     }
 
-    try stdout_buf.flush();
+    try stdout.flush();
 }

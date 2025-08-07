@@ -3,14 +3,6 @@
 //! [Namespaces in XML 1.0 (Third
 //! Edition)](https://www.w3.org/TR/2009/REC-xml-names-20091208/)
 //! specifications.
-//!
-//! This is the core, type-erased writer implementation. Generally, users will
-//! not use this directly, but will use `xml.GenericWriter`, which is a thin
-//! wrapper around this type providing type safety for returned errors.
-//!
-//! A writer writes its data to a `Sink`, which represents an output stream.
-//! Typically, this will be a wrapper around a `std.io.GenericWriter` or
-//! `std.io.AnyWriter` via the `xml.StreamingOutput` wrapper.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -39,11 +31,32 @@ pending_ns: std.AutoArrayHashMapUnmanaged(StringIndex, StringIndex),
 /// A counter for the next generated `ns123` namespace prefix to be used.
 gen_ns_prefix_counter: u32,
 
-sink: Sink,
+out: *std.Io.Writer,
 
 gpa: Allocator,
 
 const Writer = @This();
+
+test Writer {
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
+    defer writer.deinit();
+
+    try writer.xmlDeclaration("UTF-8", null);
+    try writer.elementStart("test");
+    try writer.elementStart("inner");
+    try writer.text("Hello, world!");
+    try writer.elementEnd();
+    try writer.elementEnd();
+
+    try expectEqualStrings(
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<test>
+        \\  <inner>Hello, world!</inner>
+        \\</test>
+    , bytes.written());
+}
 
 pub const Options = struct {
     /// A string to be used as indentation for the output.
@@ -72,15 +85,6 @@ pub const Options = struct {
     namespace_aware: bool = true,
 };
 
-pub const Sink = struct {
-    context: *const anyopaque,
-    writeFn: *const fn (context: *const anyopaque, data: []const u8) anyerror!void,
-
-    pub fn write(sink: *Sink, data: []const u8) anyerror!void {
-        return sink.writeFn(sink.context, data);
-    }
-};
-
 const State = enum {
     start,
     after_bom,
@@ -92,7 +96,7 @@ const State = enum {
     eof,
 };
 
-pub fn init(gpa: Allocator, sink: Sink, options: Options) Writer {
+pub fn init(gpa: Allocator, writer: *std.Io.Writer, options: Options) Writer {
     return .{
         .options = options,
 
@@ -103,7 +107,7 @@ pub fn init(gpa: Allocator, sink: Sink, options: Options) Writer {
         .pending_ns = .{},
         .gen_ns_prefix_counter = 0,
 
-        .sink = sink,
+        .out = writer,
 
         .gpa = gpa,
     };
@@ -118,46 +122,44 @@ pub fn deinit(writer: *Writer) void {
     writer.* = undefined;
 }
 
-pub const WriteError = error{};
+pub const WriteError = error{ WriteFailed, OutOfMemory };
 
 /// Writes the end of the document.
 /// If `Options.indent` is non-empty, this writes a trailing newline;
 /// otherwise, it does not write anything, but signals that further write
 /// functions should not be called.
 /// Asserts that the writer is after the root element.
-pub fn eof(writer: *Writer) anyerror!void {
+pub fn eof(writer: *Writer) WriteError!void {
     assert(writer.state == .end);
     if (writer.options.indent.len != 0) try writer.write("\n");
     writer.state = .eof;
 }
 
 test eof {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.elementStart("root");
     try writer.elementEndEmpty();
     try writer.eof();
 
-    try expectEqualStrings("<root/>\n", raw.items);
+    try expectEqualStrings("<root/>\n", bytes.written());
 }
 
 /// Writes the BOM (byte-order mark).
 /// Asserts that the writer is at the beginning of the document.
-pub fn bom(writer: *Writer) anyerror!void {
+pub fn bom(writer: *Writer) WriteError!void {
     assert(writer.state == .start);
     try writer.write("\u{FEFF}");
     writer.state = .after_bom;
 }
 
 test bom {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.bom();
@@ -165,12 +167,12 @@ test bom {
     try writer.elementEndEmpty();
     try writer.eof();
 
-    try expectEqualStrings("\u{FEFF}<root/>\n", raw.items);
+    try expectEqualStrings("\u{FEFF}<root/>\n", bytes.written());
 }
 
 /// Writes the XML declaration.
 /// Asserts that the writer is at the beginning of the document or just after the BOM (if any).
-pub fn xmlDeclaration(writer: *Writer, encoding: ?[]const u8, standalone: ?bool) anyerror!void {
+pub fn xmlDeclaration(writer: *Writer, encoding: ?[]const u8, standalone: ?bool) WriteError!void {
     assert(writer.state == .start or writer.state == .after_bom);
     try writer.write("<?xml version=\"1.0\"");
     if (encoding) |e| {
@@ -191,10 +193,9 @@ pub fn xmlDeclaration(writer: *Writer, encoding: ?[]const u8, standalone: ?bool)
 }
 
 test xmlDeclaration {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.xmlDeclaration("UTF-8", true);
@@ -206,12 +207,12 @@ test xmlDeclaration {
         \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         \\<root/>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 /// Starts an element.
 /// Asserts that the writer is not after the end of the root element.
-pub fn elementStart(writer: *Writer, name: []const u8) anyerror!void {
+pub fn elementStart(writer: *Writer, name: []const u8) WriteError!void {
     if (writer.options.namespace_aware) prefixed: {
         const colon_pos = std.mem.indexOfScalar(u8, name, ':') orelse break :prefixed;
         const prefix = name[0..colon_pos];
@@ -223,10 +224,9 @@ pub fn elementStart(writer: *Writer, name: []const u8) anyerror!void {
 }
 
 test elementStart {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.elementStart("root");
@@ -241,7 +241,7 @@ test elementStart {
         \\  </element>
         \\</root>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 /// Starts a namespaced element.
@@ -254,7 +254,7 @@ test elementStart {
 /// If `ns` is already bound to a prefix (via an attribute or `bindNs`), that
 /// prefix will be used. Otherwise, a generated namespace prefix counting
 /// upwards from `ns0` will be declared and used.
-pub fn elementStartNs(writer: *Writer, ns: []const u8, local: []const u8) anyerror!void {
+pub fn elementStartNs(writer: *Writer, ns: []const u8, local: []const u8) WriteError!void {
     assert(writer.options.namespace_aware);
     // TODO: XML 1.0 does not allow undeclaring namespace prefixes, so ensuring
     //  the empty namespace is actually used here is potentially quite tricky.
@@ -272,10 +272,9 @@ pub fn elementStartNs(writer: *Writer, ns: []const u8, local: []const u8) anyerr
 }
 
 test elementStartNs {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.elementStartNs("http://example.com/foo", "root");
@@ -294,7 +293,7 @@ test elementStartNs {
         \\  </ns1:element>
         \\</ns0:root>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 fn elementStartInternal(writer: *Writer, prefix: []const u8, local: []const u8) !void {
@@ -348,7 +347,7 @@ fn elementStartInternal(writer: *Writer, prefix: []const u8, local: []const u8) 
 
 /// Ends the currently open element.
 /// Asserts that the writer is inside an element.
-pub fn elementEnd(writer: *Writer) anyerror!void {
+pub fn elementEnd(writer: *Writer) WriteError!void {
     const name = @as(?StringIndex, writer.element_names.pop()).?;
     switch (writer.state) {
         .text => {},
@@ -374,10 +373,9 @@ pub fn elementEnd(writer: *Writer) anyerror!void {
 }
 
 test elementEnd {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.elementStart("root");
@@ -392,12 +390,12 @@ test elementEnd {
         \\  </element>
         \\</root>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 /// Ends the currently open element as an empty element (`<foo/>`).
 /// Asserts that the writer is in an element start.
-pub fn elementEndEmpty(writer: *Writer) anyerror!void {
+pub fn elementEndEmpty(writer: *Writer) WriteError!void {
     _ = writer.element_names.pop();
     assert(writer.state == .element_start);
     try writer.write("/>");
@@ -405,10 +403,9 @@ pub fn elementEndEmpty(writer: *Writer) anyerror!void {
 }
 
 test elementEndEmpty {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.elementStart("root");
@@ -422,7 +419,7 @@ test elementEndEmpty {
         \\  <element/>
         \\</root>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 /// Adds an attribute to the current element start.
@@ -430,7 +427,7 @@ test elementEndEmpty {
 ///
 /// If the writer is namespace-aware, namespace declarations are recognized and
 /// registered for future use by "Ns"-suffixed functions.
-pub fn attribute(writer: *Writer, name: []const u8, value: []const u8) anyerror!void {
+pub fn attribute(writer: *Writer, name: []const u8, value: []const u8) WriteError!void {
     assert(writer.state == .element_start);
     if (writer.options.namespace_aware) prefixed: {
         if (std.mem.eql(u8, name, "xmlns")) {
@@ -454,10 +451,9 @@ pub fn attribute(writer: *Writer, name: []const u8, value: []const u8) anyerror!
 }
 
 test attribute {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.elementStart("root");
@@ -477,7 +473,7 @@ test attribute {
         \\  <a:element/>
         \\</root>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 /// Adds a namespaced attribute to the current element start.
@@ -492,7 +488,7 @@ test attribute {
 ///
 /// If the writer is namespace-aware, namespace declarations are recognized and
 /// registered for future use by "Ns"-suffixed functions.
-pub fn attributeNs(writer: *Writer, ns: []const u8, local: []const u8, value: []const u8) anyerror!void {
+pub fn attributeNs(writer: *Writer, ns: []const u8, local: []const u8, value: []const u8) WriteError!void {
     assert(writer.options.namespace_aware);
     // TODO: XML 1.0 does not allow undeclaring namespace prefixes, so ensuring
     //  the empty namespace is actually used here is potentially quite tricky.
@@ -513,10 +509,9 @@ pub fn attributeNs(writer: *Writer, ns: []const u8, local: []const u8, value: []
 }
 
 test attributeNs {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.elementStart("root");
@@ -535,7 +530,7 @@ test attributeNs {
         \\  <a:element/>
         \\</root>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 fn attributeInternal(writer: *Writer, prefix: []const u8, name: []const u8, value: []const u8) !void {
@@ -553,7 +548,7 @@ fn attributeInternal(writer: *Writer, prefix: []const u8, name: []const u8, valu
     try writer.write("\"");
 }
 
-fn attributeText(writer: *Writer, s: []const u8) anyerror!void {
+fn attributeText(writer: *Writer, s: []const u8) WriteError!void {
     var pos: usize = 0;
     while (std.mem.indexOfAnyPos(u8, s, pos, "&<\"")) |esc_pos| {
         try writer.write(s[pos..esc_pos]);
@@ -569,7 +564,7 @@ fn attributeText(writer: *Writer, s: []const u8) anyerror!void {
 }
 
 /// Writes a comment.
-pub fn comment(writer: *Writer, s: []const u8) anyerror!void {
+pub fn comment(writer: *Writer, s: []const u8) WriteError!void {
     switch (writer.state) {
         .start, .after_bom, .after_xml_declaration, .text, .end => {},
         .element_start => {
@@ -588,10 +583,9 @@ pub fn comment(writer: *Writer, s: []const u8) anyerror!void {
 }
 
 test comment {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.comment(" Here is the document: ");
@@ -606,11 +600,11 @@ test comment {
         \\  <!-- I am inside the document -->
         \\</root>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 /// Writes a PI (processing instruction).
-pub fn pi(writer: *Writer, target: []const u8, data: []const u8) anyerror!void {
+pub fn pi(writer: *Writer, target: []const u8, data: []const u8) WriteError!void {
     switch (writer.state) {
         .start, .after_bom, .after_xml_declaration, .text, .end => {},
         .element_start => {
@@ -633,10 +627,9 @@ pub fn pi(writer: *Writer, target: []const u8, data: []const u8) anyerror!void {
 }
 
 test pi {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.pi("some-pi", "some pi data");
@@ -651,13 +644,13 @@ test pi {
         \\  <?handle-me?>
         \\</root>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 /// Writes a text node, escaping the text where necessary to preserve its value
 /// in the resulting XML.
 /// Asserts that the writer is in an element.
-pub fn text(writer: *Writer, s: []const u8) anyerror!void {
+pub fn text(writer: *Writer, s: []const u8) WriteError!void {
     switch (writer.state) {
         .after_structure_end, .text => {},
         .element_start => try writer.write(">"),
@@ -678,10 +671,9 @@ pub fn text(writer: *Writer, s: []const u8) anyerror!void {
 }
 
 test text {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.elementStart("root");
@@ -694,12 +686,12 @@ test text {
         \\&amp;amp;
         \\&lt;/root></root>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 /// Writes a CDATA node.
 /// Asserts that the writer is in an element.
-pub fn cdata(writer: *Writer, s: []const u8) anyerror!void {
+pub fn cdata(writer: *Writer, s: []const u8) WriteError!void {
     switch (writer.state) {
         .after_structure_end, .text => {},
         .element_start => try writer.write(">"),
@@ -712,10 +704,9 @@ pub fn cdata(writer: *Writer, s: []const u8) anyerror!void {
 }
 
 test cdata {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.elementStart("root");
@@ -726,12 +717,12 @@ test cdata {
     try expectEqualStrings(
         \\<root><![CDATA[Look, no <escaping> needed!]]></root>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 /// Writes a character reference.
 /// Asserts that the writer is in an element.
-pub fn characterReference(writer: *Writer, c: u21) anyerror!void {
+pub fn characterReference(writer: *Writer, c: u21) WriteError!void {
     switch (writer.state) {
         .after_structure_end, .text => {},
         .element_start => try writer.write(">"),
@@ -744,10 +735,9 @@ pub fn characterReference(writer: *Writer, c: u21) anyerror!void {
 }
 
 test characterReference {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.elementStart("root");
@@ -758,12 +748,12 @@ test characterReference {
     try expectEqualStrings(
         \\<root>&#x9F8D;</root>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 /// Writes an entity reference.
 /// Asserts that the writer is in an element.
-pub fn entityReference(writer: *Writer, name: []const u8) anyerror!void {
+pub fn entityReference(writer: *Writer, name: []const u8) WriteError!void {
     switch (writer.state) {
         .after_structure_end, .text => {},
         .element_start => try writer.write(">"),
@@ -776,10 +766,9 @@ pub fn entityReference(writer: *Writer, name: []const u8) anyerror!void {
 }
 
 test entityReference {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.elementStart("root");
@@ -790,7 +779,7 @@ test entityReference {
     try expectEqualStrings(
         \\<root>&amp;</root>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 /// Writes an XML fragment without escaping anything.
@@ -798,7 +787,7 @@ test entityReference {
 /// For correctness, the XML fragment must not contain any unclosed structures.
 /// For example, the fragment `<foo>` is illegal, as the element `foo` remains
 /// unclosed after embedding. Similarly, `<?foo` and `<!-- foo` are also illegal.
-pub fn embed(writer: *Writer, s: []const u8) anyerror!void {
+pub fn embed(writer: *Writer, s: []const u8) WriteError!void {
     switch (writer.state) {
         .start, .after_bom, .after_xml_declaration, .after_structure_end, .text, .end => {},
         .element_start => try writer.write(">"),
@@ -814,10 +803,9 @@ pub fn embed(writer: *Writer, s: []const u8) anyerror!void {
 }
 
 test embed {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.xmlDeclaration("UTF-8", null);
@@ -830,7 +818,7 @@ test embed {
         \\<?xml version="1.0" encoding="UTF-8"?>
         \\<foo><bar>Baz!</bar></foo>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 /// Binds a namespace URI to a prefix.
@@ -839,15 +827,14 @@ test embed {
 /// declared immediately. Otherwise, it will be declared on the next element
 /// started. If/when `prefix` is null the namespace will be declared as a
 /// default namespace (no prefix) for the element.
-pub fn bindNs(writer: *Writer, prefix: []const u8, ns: []const u8) anyerror!void {
+pub fn bindNs(writer: *Writer, prefix: []const u8, ns: []const u8) WriteError!void {
     try writer.bindNsInternal(try writer.addString(prefix), ns);
 }
 
 test bindNs {
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     // Namespaces may be bound before the element they apply to, allowing a
@@ -874,7 +861,7 @@ test bindNs {
         \\  <ex4 xmlns="http://example.com/ex4"/>
         \\</ex:root>
         \\
-    , raw.items);
+    , bytes.written());
 }
 
 fn bindNsInternal(writer: *Writer, prefix_str: StringIndex, ns: []const u8) !void {
@@ -937,7 +924,7 @@ fn generateNsPrefix(writer: *Writer) !StringIndex {
     }
 }
 
-fn newLineAndIndent(writer: *Writer) anyerror!void {
+fn newLineAndIndent(writer: *Writer) !void {
     if (writer.options.indent.len == 0) return;
 
     try writer.write("\n");
@@ -946,8 +933,8 @@ fn newLineAndIndent(writer: *Writer) anyerror!void {
     }
 }
 
-fn write(writer: *Writer, s: []const u8) anyerror!void {
-    try writer.sink.write(s);
+fn write(writer: *Writer, s: []const u8) !void {
+    try writer.out.writeAll(s);
 }
 
 const StringIndex = enum(usize) { empty = 0, _ };
@@ -992,10 +979,9 @@ fn string(writer: *const Writer, index: StringIndex) []const u8 {
 
 test "namespace prefix strings resize bug" {
     // Reported here: https://github.com/ianprime0509/zig-xml/pull/41#issuecomment-2449960818
-    var raw = std.ArrayList(u8).init(std.testing.allocator);
-    defer raw.deinit();
-    const out = xml.streamingOutput(raw.writer());
-    var writer = out.writer(std.testing.allocator, .{ .indent = "  " });
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
     defer writer.deinit();
 
     try writer.bindNs("d", "foospace");
@@ -1009,5 +995,5 @@ test "namespace prefix strings resize bug" {
         \\<d:root xmlns:d="foospace">
         \\  <d:child>Hello, Bug</d:child>
         \\</d:root>
-    , raw.items);
+    , bytes.written());
 }

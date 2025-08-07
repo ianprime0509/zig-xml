@@ -3,16 +3,6 @@
 //! XML 1.0 (Third Edition)](https://www.w3.org/TR/2009/REC-xml-names-20091208/)
 //! specifications.
 //!
-//! This is the core, type-erased reader implementation. Generally, users will
-//! not use this directly, but will use `xml.GenericReader`, which is a thin
-//! wrapper around this type providing type safety for returned errors.
-//!
-//! A reader gets its raw data from a `Source`, which acts as a forward-only
-//! window of an XML document. In a simple case (`xml.StaticDocument`), this
-//! may just be slices of a document loaded completely in memory, but the same
-//! interface works just as well for a document streamed from a byte reader
-//! (`xml.StreamingDocument`).
-//!
 //! Calling `read` returns the next `Node` in the document, and other reader
 //! functions specific to each node type can be used to obtain more information
 //! about the current node. The convention is that functions associated with a
@@ -32,7 +22,7 @@
 //!     store any allocated data in a scratch buffer in the reader which is
 //!     cleared on every call to such a function.
 //! - Functions whose names end in `Write` write their results into a
-//!   `std.io.AnyWriter`.
+//!   `std.Io.Writer`.
 //! - Functions whose names end in `Ns` may only be called on a `Reader`
 //!   configured as namespace-aware. Namespace awareness is on by default in
 //!   `Options`.
@@ -93,7 +83,7 @@ ns_prefixes: std.ArrayListUnmanaged(std.AutoArrayHashMapUnmanaged(StringIndex, S
 /// The Unicode code point associated with the current character reference.
 character: u21,
 
-source: Source,
+vtable: *const VTable,
 /// The source location of the beginning of `buf`.
 loc: Location,
 /// Buffered data read from `source`.
@@ -108,7 +98,7 @@ error_code: ErrorCode,
 /// The position of the current error in `buf`.
 error_pos: usize,
 
-scratch: std.ArrayListUnmanaged(u8),
+scratch: std.Io.Writer.Allocating,
 
 gpa: Allocator,
 
@@ -178,9 +168,7 @@ pub const ErrorCode = enum {
     illegal_character,
 };
 
-/// A forward-only sliding window of a UTF-8-encoded XML document.
-pub const Source = struct {
-    context: *const anyopaque,
+pub const VTable = struct {
     /// Moves the start of the window forward by `advance` bytes and sets the
     /// length of the window from the new starting position to `len` bytes, or
     /// until the end of the document if it contains fewer than `len` bytes from
@@ -188,21 +176,28 @@ pub const Source = struct {
     /// content in the window.
     ///
     /// The new start of the window must not exceed the document's length.
-    moveFn: *const fn (context: *const anyopaque, advance: usize, len: usize) anyerror![]const u8,
+    move: *const fn (reader: *Reader, advance: usize, len: usize) MoveError!void,
     /// Returns whether `encoding` is a supported value for the encoding in the
     /// XML declaration.
     ///
     /// At least one call to `moveFn` must be made before calling this function.
-    checkEncodingFn: *const fn (context: *const anyopaque, encoding: []const u8) bool,
-
-    pub fn move(source: Source, advance: usize, len: usize) anyerror![]const u8 {
-        return source.moveFn(source.context, advance, len);
-    }
-
-    pub fn checkEncoding(source: Source, encoding: []const u8) bool {
-        return source.checkEncodingFn(source.context, encoding);
-    }
+    checkEncoding: *const fn (reader: *Reader, encoding: []const u8) bool,
 };
+
+pub const MoveError = error{ReadFailed};
+
+fn move(reader: *Reader, advance: usize, len: usize) MoveError!void {
+    return reader.vtable.move(reader, advance, len);
+}
+
+fn checkEncoding(reader: *Reader, encoding: []const u8) bool {
+    return reader.vtable.checkEncoding(reader, encoding);
+}
+
+pub fn checkEncodingUtf8(reader: *Reader, encoding: []const u8) bool {
+    _ = reader;
+    return std.ascii.eqlIgnoreCase(encoding, "UTF-8");
+}
 
 const State = enum {
     invalid,
@@ -216,7 +211,331 @@ const State = enum {
     eof,
 };
 
-pub fn init(gpa: Allocator, source: Source, options: Options) Reader {
+/// Reads from a UTF-8 encoded XML document stored entirely in memory.
+pub const Static = struct {
+    data: []const u8,
+    pos: usize,
+    interface: Reader,
+
+    pub fn init(gpa: Allocator, data: []const u8, options: Options) Static {
+        return .{
+            .data = data,
+            .pos = 0,
+            .interface = .init(gpa, options, &.{
+                .move = &Static.move,
+                .checkEncoding = &checkEncodingUtf8,
+            }),
+        };
+    }
+
+    pub fn deinit(reader: *Static) void {
+        reader.interface.deinit();
+        reader.* = undefined;
+    }
+
+    fn move(reader: *Reader, advance: usize, len: usize) MoveError!void {
+        const self: *Static = @alignCast(@fieldParentPtr("interface", reader));
+        self.pos += advance;
+        const data = self.data[self.pos..];
+        reader.buf = data[0..@min(len, data.len)];
+    }
+};
+
+test Static {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<?xml version="1.0"?>
+        \\<root>Hello, 世界 👋!</root>
+        \\
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.xml_declaration, try reader.read());
+    try expectEqualStrings("1.0", reader.xmlDeclarationVersion());
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.text, try reader.read());
+    try expectEqualStrings("Hello, 世界 👋!", reader.textRaw());
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.eof, try reader.read());
+}
+
+/// Reads a UTF-8 or UTF-16 encoded XML document from a `std.Io.Reader`.
+pub const Streaming = struct {
+    in: *std.Io.Reader,
+    state: enum {
+        start,
+        utf8,
+        utf16be,
+        utf16le,
+    },
+    err: ?StreamError = null,
+
+    transcode_buf: [3]u8,
+    transcode_buf_len: u2,
+
+    buf: []u8,
+    pos: usize,
+    avail: usize,
+    gpa: Allocator,
+
+    interface: Reader,
+
+    pub const StreamError = error{
+        /// An error occurred when reading from the input reader. Consult the
+        /// input reader's state for more detailed information.
+        ReadFailed,
+        /// Ran out of memory when trying to grow the internal buffer.
+        OutOfMemory,
+    };
+
+    /// Asserts that `in` has a buffer of at least 2 bytes.
+    pub fn init(gpa: Allocator, in: *std.io.Reader, options: Options) @This() {
+        assert(in.buffer.len >= 2);
+        return .{
+            .in = in,
+            .state = .start,
+
+            .transcode_buf = undefined,
+            .transcode_buf_len = 0,
+
+            .buf = &.{},
+            .pos = 0,
+            .avail = 0,
+            .gpa = gpa,
+
+            .interface = .init(gpa, options, &.{
+                .move = &Streaming.move,
+                .checkEncoding = &Streaming.checkEncoding,
+            }),
+        };
+    }
+
+    pub fn deinit(reader: *Streaming) void {
+        reader.gpa.free(reader.buf);
+        reader.interface.deinit();
+        reader.* = undefined;
+    }
+
+    fn move(reader: *Reader, advance: usize, len: usize) MoveError!void {
+        const self: *Streaming = @alignCast(@fieldParentPtr("interface", reader));
+        self.pos += advance;
+        if (len <= self.avail - self.pos) {
+            reader.buf = self.buf[self.pos..][0..len];
+            return;
+        }
+        self.discardRead();
+        self.fillBuffer(len) catch |err| {
+            self.err = err;
+            return error.ReadFailed;
+        };
+        reader.buf = self.buf[0..@min(len, self.avail)];
+    }
+
+    fn discardRead(reader: *Streaming) void {
+        reader.avail -= reader.pos;
+        std.mem.copyForwards(u8, reader.buf[0..reader.avail], reader.buf[reader.pos..][0..reader.avail]);
+        reader.pos = 0;
+    }
+
+    const min_buf_len = 4096;
+
+    fn fillBuffer(reader: *Streaming, target_len: usize) StreamError!void {
+        if (target_len > reader.buf.len) {
+            const new_buf_len = @max(min_buf_len, std.math.ceilPowerOfTwoAssert(usize, target_len));
+            reader.buf = try reader.gpa.realloc(reader.buf, new_buf_len);
+        }
+        read: switch (reader.state) {
+            .start => {
+                const start = reader.in.peek(2) catch |err| switch (err) {
+                    error.ReadFailed => return error.ReadFailed,
+                    error.EndOfStream => {
+                        reader.state = .utf8;
+                        continue :read reader.state;
+                    },
+                };
+                if (std.mem.eql(u8, start, "\xFE\xFF")) {
+                    reader.in.toss(2);
+                    reader.state = .utf16be;
+                } else if (std.mem.eql(u8, start, "\xFF\xFE")) {
+                    reader.in.toss(2);
+                    reader.state = .utf16le;
+                } else {
+                    reader.state = .utf8;
+                }
+                continue :read reader.state;
+            },
+            .utf8 => {
+                reader.avail += try reader.in.readSliceShort(reader.buf[reader.avail..]);
+            },
+            .utf16be => {
+                try reader.fillBufferUtf16(.big);
+            },
+            .utf16le => {
+                try reader.fillBufferUtf16(.little);
+            },
+        }
+    }
+
+    /// Transcodes UTF-16 from the input buffer into UTF-8 in the document
+    /// buffer. Invalid UTF-16 is transcoded to invalid UTF-8.
+    fn fillBufferUtf16(reader: *Streaming, endian: std.builtin.Endian) !void {
+        if (reader.transcode_buf_len > 0) {
+            const can_copy = @min(reader.transcode_buf_len, reader.buf.len - reader.avail);
+            @memcpy(reader.buf[reader.avail..][0..can_copy], reader.transcode_buf[0..can_copy]);
+            std.mem.copyForwards(u8, &reader.transcode_buf, reader.transcode_buf[can_copy..]);
+            reader.transcode_buf_len -= can_copy;
+            reader.avail += can_copy;
+        }
+
+        while (reader.avail < reader.buf.len) {
+            const cp: u21 = cp: {
+                const u = reader.in.takeInt(u16, endian) catch |err| switch (err) {
+                    error.ReadFailed => return error.ReadFailed,
+                    error.EndOfStream => {
+                        // We have to check if we have an odd input length here
+                        // and, if so, produce invalid UTF-8 (an unpaired high
+                        // surrogate).
+                        if (reader.in.takeByte()) |b| {
+                            break :cp 0xD800 + @as(u16, b);
+                        } else |e| switch (e) {
+                            error.ReadFailed => return error.ReadFailed,
+                            error.EndOfStream => break,
+                        }
+                    },
+                };
+                if (!std.unicode.utf16IsHighSurrogate(u)) break :cp u;
+                const low = reader.in.takeInt(u16, endian) catch |err| switch (err) {
+                    error.ReadFailed => return error.ReadFailed,
+                    error.EndOfStream => break :cp u,
+                };
+                break :cp std.unicode.utf16DecodeSurrogatePair(&.{ u, low }) catch u;
+            };
+
+            // No error is possible since the codepoint was decoded from
+            // UTF-16, so it can't be too large (and utf8CodepointSequenceLength
+            // doesn't check for unpaired surrogates).
+            const enc_len = std.unicode.utf8CodepointSequenceLength(cp) catch unreachable;
+            if (reader.avail + enc_len <= reader.buf.len) {
+                // Happy path: encode directly into the available buffer.
+                @branchHint(.likely);
+                _ = std.unicode.wtf8Encode(cp, reader.buf[reader.avail..]) catch unreachable;
+                reader.avail += enc_len;
+            } else {
+                // Encode into a temporary buffer and keep what we can't
+                // encode in the transcode buffer.
+                const can_encode = reader.buf.len - reader.avail;
+                var buf: [4]u8 = undefined;
+                _ = std.unicode.wtf8Encode(cp, &buf) catch unreachable;
+                @memcpy(reader.buf[reader.avail..][0..can_encode], buf[0..can_encode]);
+                reader.avail += can_encode;
+                const must_store = enc_len - can_encode;
+                @memcpy(reader.transcode_buf[0..must_store], buf[can_encode..][0..must_store]);
+                reader.transcode_buf_len = @intCast(must_store);
+            }
+        }
+    }
+
+    fn checkEncoding(reader: *Reader, encoding: []const u8) bool {
+        const self: *const Streaming = @alignCast(@fieldParentPtr("interface", reader));
+        return switch (self.state) {
+            .start => unreachable, // Can't check encoding before reading anything.
+            .utf8 => std.ascii.eqlIgnoreCase(encoding, "UTF-8"),
+            .utf16be, .utf16le => std.ascii.eqlIgnoreCase(encoding, "UTF-16"),
+        };
+    }
+};
+
+test Streaming {
+    var bytes: std.io.Reader = .fixed(
+        \\<?xml version="1.0"?>
+        \\<root>Hello, 世界 👋!</root>
+        \\
+    );
+    var streaming_reader: xml.Reader.Streaming = .init(std.testing.allocator, &bytes, .{});
+    defer streaming_reader.deinit();
+    const reader = &streaming_reader.interface;
+
+    try expectEqual(.xml_declaration, try reader.read());
+    try expectEqualStrings("1.0", reader.xmlDeclarationVersion());
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.text, try reader.read());
+    try expectEqualStrings("Hello, 世界 👋!", reader.textRaw());
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.eof, try reader.read());
+}
+
+test "streaming with UTF-16BE" {
+    try testStreamingUtf16(.big);
+}
+
+test "streaming with UTF-16LE" {
+    try testStreamingUtf16(.little);
+}
+
+fn testStreamingUtf16(comptime endian: std.builtin.Endian) !void {
+    var bytes: std.io.Reader = .fixed(utf16BytesLiteral(endian, "\u{FEFF}" ++
+        \\<?xml version="1.0"?>
+        \\<root>Hello, 世界 👋!</root>
+        \\
+    ));
+    var streaming_reader: xml.Reader.Streaming = .init(std.testing.allocator, &bytes, .{});
+    defer streaming_reader.deinit();
+    const reader = &streaming_reader.interface;
+
+    try expectEqual(.xml_declaration, try reader.read());
+    try expectEqualStrings("1.0", reader.xmlDeclarationVersion());
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.text, try reader.read());
+    try expectEqualStrings("Hello, 世界 👋!", reader.textRaw());
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.eof, try reader.read());
+}
+
+inline fn utf16BytesLiteral(comptime endian: std.builtin.Endian, comptime utf8: []const u8) []const u8 {
+    const utf16 = std.unicode.utf8ToUtf16LeStringLiteral(utf8);
+    var utf16_bytes: [utf16.len * 2]u8 = undefined;
+    for (utf16, 0..) |cu, i| {
+        std.mem.writeInt(u16, utf16_bytes[i * 2 ..][0..2], cu, endian);
+    }
+    const utf16_bytes_final = utf16_bytes;
+    return &utf16_bytes_final;
+}
+
+test "streaming with extremely long element name" {
+    const name = "a" ** 65536;
+    var bytes: std.Io.Reader = .fixed("<" ++ name ++ "/>");
+    var streaming_reader: xml.Reader.Streaming = .init(std.testing.allocator, &bytes, .{});
+    defer streaming_reader.deinit();
+    const reader = &streaming_reader.interface;
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings(name, reader.elementName());
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings(name, reader.elementName());
+
+    try expectEqual(.eof, try reader.read());
+}
+
+pub fn init(gpa: Allocator, options: Options, vtable: *const VTable) Reader {
     return .{
         .options = options,
 
@@ -229,7 +548,7 @@ pub fn init(gpa: Allocator, source: Source, options: Options) Reader {
         .ns_prefixes = .{},
         .character = undefined,
 
-        .source = source,
+        .vtable = vtable,
         .loc = if (options.location_aware) Location.start else undefined,
         .buf = &.{},
         .pos = 0,
@@ -238,7 +557,7 @@ pub fn init(gpa: Allocator, source: Source, options: Options) Reader {
         .error_code = undefined,
         .error_pos = undefined,
 
-        .scratch = .{},
+        .scratch = .init(gpa),
 
         .gpa = gpa,
     };
@@ -252,7 +571,7 @@ pub fn deinit(reader: *Reader) void {
     reader.element_names.deinit(reader.gpa);
     for (reader.ns_prefixes.items) |*map| map.deinit(reader.gpa);
     reader.ns_prefixes.deinit(reader.gpa);
-    reader.scratch.deinit(reader.gpa);
+    reader.scratch.deinit();
     reader.* = undefined;
 }
 
@@ -264,13 +583,13 @@ pub fn location(reader: Reader) Location {
 }
 
 test location {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root>
         \\  <sub>Hello, world!</sub>
         \\</root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
 
     try expectEqual(.element_start, try reader.read());
     try expectEqualDeep(Location{ .line = 1, .column = 1 }, reader.location());
@@ -302,13 +621,13 @@ pub fn errorCode(reader: Reader) ErrorCode {
 }
 
 test errorCode {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root>
         \\  <123>Hello, world!</123>
         \\</root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
 
     try expectEqual(.element_start, try reader.read());
     try expectEqual(.text, try reader.read());
@@ -326,13 +645,13 @@ pub fn errorLocation(reader: Reader) Location {
 }
 
 test errorLocation {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root>
         \\  <123>Hello, world!</123>
         \\</root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
 
     try expectEqual(.element_start, try reader.read());
     try expectEqual(.text, try reader.read());
@@ -349,12 +668,13 @@ pub fn xmlDeclarationVersion(reader: Reader) []const u8 {
 }
 
 test xmlDeclarationVersion {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<?xml version="1.0"?>
         \\<root/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.xml_declaration, try reader.read());
     try expectEqualStrings("1.0", reader.xmlDeclarationVersion());
 }
@@ -369,12 +689,13 @@ pub fn xmlDeclarationEncoding(reader: Reader) ?[]const u8 {
 }
 
 test xmlDeclarationEncoding {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<?xml version="1.0" encoding="UTF-8"?>
         \\<root/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.xml_declaration, try reader.read());
     try expectEqualStrings("UTF-8", reader.xmlDeclarationEncoding().?);
 }
@@ -388,12 +709,13 @@ pub fn xmlDeclarationStandalone(reader: Reader) ?bool {
 }
 
 test xmlDeclarationStandalone {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         \\<root/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.xml_declaration, try reader.read());
     try expectEqual(true, reader.xmlDeclarationStandalone());
 }
@@ -407,11 +729,12 @@ pub fn elementName(reader: Reader) []const u8 {
 }
 
 test elementName {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqualStrings("root", reader.elementName());
     try expectEqual(.element_end, try reader.read());
@@ -427,13 +750,13 @@ pub fn elementNameNs(reader: Reader) PrefixedQName {
 }
 
 test elementNameNs {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root xmlns="https://example.com/ns" xmlns:a="https://example.com/ns2">
         \\  <a:a/>
         \\</root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
 
     try expectEqual(.element_start, try reader.read());
     try expectEqualStrings("", reader.elementNameNs().prefix);
@@ -476,11 +799,12 @@ pub fn attributeCount(reader: Reader) usize {
 }
 
 test attributeCount {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root a="1" b="2" c="3"/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqual(3, reader.attributeCount());
 }
@@ -498,11 +822,12 @@ pub fn attributeName(reader: Reader, n: usize) []const u8 {
 }
 
 test attributeName {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root a="1" b="2" c="3"/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqualStrings("a", reader.attributeName(0));
     try expectEqualStrings("b", reader.attributeName(1));
@@ -523,11 +848,12 @@ pub fn attributeNameNs(reader: Reader, n: usize) PrefixedQName {
 }
 
 test attributeNameNs {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root xmlns:pre="https://example.com/ns" a="1" pre:b="2"/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
 
     try expectEqualStrings("xmlns", reader.attributeNameNs(0).prefix);
@@ -560,20 +886,17 @@ pub fn attributeValue(reader: *Reader, n: usize) Allocator.Error![]const u8 {
     const raw = reader.attributeValueRaw(n);
     if (std.mem.indexOfAny(u8, raw, "&\t\r\n") == null) return raw;
     reader.scratch.clearRetainingCapacity();
-    const writer = reader.scratch.writer(reader.gpa);
-    reader.attributeValueWrite(n, writer.any()) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => unreachable,
-    };
-    return reader.scratch.items;
+    reader.attributeValueWrite(n, &reader.scratch.writer) catch return error.OutOfMemory;
+    return reader.scratch.written();
 }
 
 test attributeValue {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root a="1" b="2" c="1 &amp; 2"/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqualStrings("1", try reader.attributeValue(0));
     try expectEqualStrings("2", try reader.attributeValue(1));
@@ -584,22 +907,19 @@ test attributeValue {
 /// Asserts that the current node is `Node.element_start` and `n` is less than `reader.nAttributes()`.
 /// The returned value is allocated using `gpa` and is owned by the caller.
 pub fn attributeValueAlloc(reader: Reader, gpa: Allocator, n: usize) Allocator.Error![]u8 {
-    var buf = std.ArrayList(u8).init(gpa);
-    defer buf.deinit();
-    const buf_writer = buf.writer();
-    reader.attributeValueWrite(n, buf_writer.any()) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => unreachable,
-    };
-    return buf.toOwnedSlice();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    reader.attributeValueWrite(n, &out.writer) catch return error.OutOfMemory;
+    return out.toOwnedSlice();
 }
 
 test attributeValueAlloc {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root a="1" b="2" c="1 &amp; 2"/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
 
     const attr0 = try reader.attributeValueAlloc(std.testing.allocator, 0);
@@ -615,7 +935,7 @@ test attributeValueAlloc {
 
 /// Writes the value of the `n`th attribute of the element to `writer`.
 /// Asserts that the current node is `Node.element_start` and `n` is less than `reader.nAttributes()`.
-pub fn attributeValueWrite(reader: Reader, n: usize, writer: std.io.AnyWriter) anyerror!void {
+pub fn attributeValueWrite(reader: Reader, n: usize, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     const raw = reader.attributeValueRaw(n);
     var pos: usize = 0;
     while (std.mem.indexOfAnyPos(u8, raw, pos, "&\t\r\n")) |split_pos| {
@@ -656,26 +976,27 @@ pub fn attributeValueWrite(reader: Reader, n: usize, writer: std.io.AnyWriter) a
 }
 
 test attributeValueWrite {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root a="1" b="2" c="1 &amp; 2"/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
 
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
 
-    try reader.attributeValueWrite(0, buf.writer());
-    try expectEqualStrings("1", buf.items);
+    try reader.attributeValueWrite(0, &out.writer);
+    try expectEqualStrings("1", out.written());
 
-    buf.clearRetainingCapacity();
-    try reader.attributeValueWrite(1, buf.writer());
-    try expectEqualStrings("2", buf.items);
+    out.clearRetainingCapacity();
+    try reader.attributeValueWrite(1, &out.writer);
+    try expectEqualStrings("2", out.written());
 
-    buf.clearRetainingCapacity();
-    try reader.attributeValueWrite(2, buf.writer());
-    try expectEqualStrings("1 & 2", buf.items);
+    out.clearRetainingCapacity();
+    try reader.attributeValueWrite(2, &out.writer);
+    try expectEqualStrings("1 & 2", out.written());
 }
 
 /// Returns the raw value of the `n`th attribute of the element, as it appears in the source.
@@ -687,11 +1008,12 @@ pub fn attributeValueRaw(reader: Reader, n: usize) []const u8 {
 }
 
 test attributeValueRaw {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root a="1" b="2" c="1 &amp; 2"/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqualStrings("1", reader.attributeValueRaw(0));
     try expectEqualStrings("2", reader.attributeValueRaw(1));
@@ -727,11 +1049,12 @@ pub fn attributeIndex(reader: Reader, name: []const u8) ?usize {
 }
 
 test attributeIndex {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root one="1" two="2" three="3"/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqual(0, reader.attributeIndex("one"));
     try expectEqual(1, reader.attributeIndex("two"));
@@ -747,11 +1070,12 @@ pub fn attributeIndexNs(reader: Reader, ns: []const u8, local: []const u8) ?usiz
 }
 
 test attributeIndexNs {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root xmlns="http://example.com" xmlns:foo="http://example.com/foo" one="1" foo:two="2"/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqual(0, reader.attributeIndexNs("", "xmlns"));
     try expectEqual(1, reader.attributeIndexNs("http://www.w3.org/2000/xmlns/", "foo"));
@@ -771,35 +1095,37 @@ pub fn comment(reader: *Reader) Allocator.Error![]const u8 {
 }
 
 test comment {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<!-- Hello, world! -->
         \\<root/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.comment, try reader.read());
     try expectEqualStrings(" Hello, world! ", try reader.comment());
 }
 
 /// Writes the text of the comment to `writer`.
 /// Asserts that the current node is `Node.comment`.
-pub fn commentWrite(reader: Reader, writer: std.io.AnyWriter) anyerror!void {
+pub fn commentWrite(reader: Reader, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writeNewlineNormalized(reader.commentRaw(), writer);
 }
 
 test commentWrite {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<!-- Hello, world! -->
         \\<root/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.comment, try reader.read());
 
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try reader.commentWrite(buf.writer());
-    try expectEqualStrings(" Hello, world! ", buf.items);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try reader.commentWrite(&out.writer);
+    try expectEqualStrings(" Hello, world! ", out.written());
 }
 
 /// Returns the raw text of the comment, as it appears in the source.
@@ -811,12 +1137,13 @@ pub fn commentRaw(reader: Reader) []const u8 {
 }
 
 test commentRaw {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<!-- Hello, world! -->
         \\<root/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.comment, try reader.read());
     try expectEqualStrings(" Hello, world! ", reader.commentRaw());
 }
@@ -838,12 +1165,13 @@ pub fn piTarget(reader: Reader) []const u8 {
 }
 
 test piTarget {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<?pi-target pi-data?>
         \\<root/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.pi, try reader.read());
     try expectEqualStrings("pi-target", reader.piTarget());
 }
@@ -870,35 +1198,37 @@ pub fn piData(reader: *Reader) Allocator.Error![]const u8 {
 }
 
 test piData {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<?pi-target pi-data?>
         \\<root/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.pi, try reader.read());
     try expectEqualStrings("pi-data", try reader.piData());
 }
 
 /// Writes the data of the PI to `writer`.
 /// Asserts that the current node is `Node.pi`.
-pub fn piDataWrite(reader: Reader, writer: std.io.AnyWriter) anyerror!void {
+pub fn piDataWrite(reader: Reader, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writeNewlineNormalized(reader.piDataRaw(), writer);
 }
 
 test piDataWrite {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<?pi-target pi-data?>
         \\<root/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.pi, try reader.read());
 
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try reader.piDataWrite(buf.writer());
-    try expectEqualStrings("pi-data", buf.items);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try reader.piDataWrite(&out.writer);
+    try expectEqualStrings("pi-data", out.written());
 }
 
 /// Returns the raw data of the PI, as it appears in the source.
@@ -910,12 +1240,13 @@ pub fn piDataRaw(reader: Reader) []const u8 {
 }
 
 test piDataRaw {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<?pi-target pi-data?>
         \\<root/>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.pi, try reader.read());
     try expectEqualStrings("pi-data", reader.piDataRaw());
 }
@@ -942,11 +1273,12 @@ pub fn text(reader: *Reader) Allocator.Error![]const u8 {
 }
 
 test text {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root>Hello, world!</root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqual(.text, try reader.read());
     try expectEqualStrings("Hello, world!", try reader.text());
@@ -954,23 +1286,24 @@ test text {
 
 /// Writes the text to `writer`.
 /// Asserts that the current node is `Node.text`.
-pub fn textWrite(reader: Reader, writer: std.io.AnyWriter) anyerror!void {
+pub fn textWrite(reader: Reader, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writeNewlineNormalized(reader.textRaw(), writer);
 }
 
 test textWrite {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root>Hello, world!</root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqual(.text, try reader.read());
 
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try reader.textWrite(buf.writer());
-    try expectEqualStrings("Hello, world!", buf.items);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try reader.textWrite(&out.writer);
+    try expectEqualStrings("Hello, world!", out.written());
 }
 
 /// Returns the raw text, as it appears in the source.
@@ -982,11 +1315,12 @@ pub fn textRaw(reader: Reader) []const u8 {
 }
 
 test textRaw {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root>Hello, world!</root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqual(.text, try reader.read());
     try expectEqualStrings("Hello, world!", reader.textRaw());
@@ -1011,11 +1345,12 @@ pub fn cdata(reader: *Reader) Allocator.Error![]const u8 {
 }
 
 test cdata {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root><![CDATA[Hello, world!]]></root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqual(.cdata, try reader.read());
     try expectEqualStrings("Hello, world!", try reader.cdata());
@@ -1023,23 +1358,24 @@ test cdata {
 
 /// Writes the text of the CDATA section to `writer`.
 /// Asserts that the current node is `Node.cdata`.
-pub fn cdataWrite(reader: Reader, writer: std.io.AnyWriter) anyerror!void {
+pub fn cdataWrite(reader: Reader, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writeNewlineNormalized(reader.cdataRaw(), writer);
 }
 
 test cdataWrite {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root><![CDATA[Hello, world!]]></root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqual(.cdata, try reader.read());
 
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try reader.cdataWrite(buf.writer());
-    try expectEqualStrings("Hello, world!", buf.items);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try reader.cdataWrite(&out.writer);
+    try expectEqualStrings("Hello, world!", out.written());
 }
 
 /// Returns the raw text of the CDATA section, as it appears in the source.
@@ -1051,11 +1387,12 @@ pub fn cdataRaw(reader: Reader) []const u8 {
 }
 
 test cdataRaw {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root><![CDATA[Hello, world!]]></root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqual(.cdata, try reader.read());
     try expectEqualStrings("Hello, world!", reader.cdataRaw());
@@ -1078,11 +1415,12 @@ pub fn entityReferenceName(reader: Reader) []const u8 {
 }
 
 test entityReferenceName {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root>&amp;</root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqual(.entity_reference, try reader.read());
     try expectEqualStrings("amp", reader.entityReferenceName());
@@ -1104,11 +1442,12 @@ pub fn characterReferenceChar(reader: Reader) u21 {
 }
 
 test characterReferenceChar {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root>&#x20;</root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqual(.character_reference, try reader.read());
     try expectEqual(0x20, reader.characterReferenceChar());
@@ -1123,11 +1462,12 @@ pub fn characterReferenceName(reader: Reader) []const u8 {
 }
 
 test characterReferenceName {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root>&#x20;</root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
     try expectEqual(.element_start, try reader.read());
     try expectEqual(.character_reference, try reader.read());
     try expectEqualStrings("x20", reader.characterReferenceName());
@@ -1144,15 +1484,11 @@ fn characterReferenceNamePos(reader: Reader) usize {
 fn newlineNormalizedScratch(reader: *Reader, raw: []const u8) Allocator.Error![]const u8 {
     if (std.mem.indexOfScalar(u8, raw, '\r') == null) return raw;
     reader.scratch.clearRetainingCapacity();
-    const writer = reader.scratch.writer(reader.gpa);
-    writeNewlineNormalized(raw, writer.any()) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => unreachable,
-    };
-    return reader.scratch.items;
+    writeNewlineNormalized(raw, &reader.scratch.writer) catch return error.OutOfMemory;
+    return reader.scratch.written();
 }
 
-fn writeNewlineNormalized(raw: []const u8, writer: std.io.AnyWriter) anyerror!void {
+fn writeNewlineNormalized(raw: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     var pos: usize = 0;
     while (std.mem.indexOfScalarPos(u8, raw, pos, '\r')) |cr_pos| {
         try writer.writeAll(raw[pos..cr_pos]);
@@ -1183,16 +1519,16 @@ pub fn namespaceUri(reader: Reader, prefix: []const u8) []const u8 {
 }
 
 test namespaceUri {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root
         \\  xmlns="https://example.com/default"
         \\  xmlns:other="https://example.com/other"
         \\>
         \\  <a xmlns:child="https://example.com/child"/>
         \\</root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
 
     try expectEqual(.element_start, try reader.read());
     try expectEqualStrings("https://example.com/default", reader.namespaceUri(""));
@@ -1237,10 +1573,11 @@ fn parseQName(reader: Reader, name: []const u8) PrefixedQName {
     };
 }
 
-pub const ReadError = error{MalformedXml} || Allocator.Error;
+pub const ReadError = error{ MalformedXml, ReadFailed, OutOfMemory };
+pub const ReadWriteError = ReadError || error{WriteFailed};
 
 /// Reads and returns the next node in the document.
-pub fn read(reader: *Reader) anyerror!Node {
+pub fn read(reader: *Reader) ReadError!Node {
     errdefer reader.node = null;
     const node: Node = node: switch (reader.state) {
         .invalid => return error.MalformedXml,
@@ -1386,19 +1723,21 @@ pub fn read(reader: *Reader) anyerror!Node {
 /// The current node after returning is the end of the element.
 /// Asserts that the current node is `Node.element_start`.
 /// The returned memory is owned by `reader` and valid only until the next call to another reader function..
-pub fn readElementText(reader: *Reader) anyerror![]const u8 {
+pub fn readElementText(reader: *Reader) ReadWriteError![]const u8 {
     reader.scratch.clearRetainingCapacity();
-    const writer = reader.scratch.writer(reader.gpa);
-    try reader.readElementTextWrite(writer.any());
-    return reader.scratch.items;
+    reader.readElementTextWrite(&reader.scratch.writer) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
+    };
+    return reader.scratch.written();
 }
 
 test readElementText {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root>Hello, <em>world</em>!</root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
 
     try expectEqual(.element_start, try reader.read());
     try expectEqualStrings("root", reader.elementName());
@@ -1411,23 +1750,22 @@ test readElementText {
 /// The current node after returning is the end of the element.
 /// Asserts that the current node is `Node.element_start`.
 /// The returned value is allocated using `gpa` and is owned by the caller.
-pub fn readElementTextAlloc(reader: *Reader, gpa: Allocator) anyerror![]u8 {
-    var buf = std.ArrayList(u8).init(gpa);
-    defer buf.deinit();
-    const buf_writer = buf.writer();
-    reader.readElementTextWrite(buf_writer.any()) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => unreachable,
+pub fn readElementTextAlloc(reader: *Reader, gpa: Allocator) ReadError![]u8 {
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    reader.readElementTextWrite(&out.writer) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
     };
-    return buf.toOwnedSlice();
+    return out.toOwnedSlice();
 }
 
 test readElementTextAlloc {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root>Hello, <em>world</em>!</root>
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
 
     try expectEqual(.element_start, try reader.read());
     try expectEqualStrings("root", reader.elementName());
@@ -1442,7 +1780,7 @@ test readElementTextAlloc {
 /// `writer`.
 /// The current node after returning is the end of the element.
 /// Asserts that the current node is `Node.element_start`.
-pub fn readElementTextWrite(reader: *Reader, writer: std.io.AnyWriter) anyerror!void {
+pub fn readElementTextWrite(reader: *Reader, writer: *std.Io.Writer) ReadWriteError!void {
     assert(reader.node == .element_start);
     const depth = reader.element_names.items.len;
     while (true) {
@@ -1468,7 +1806,7 @@ pub fn readElementTextWrite(reader: *Reader, writer: std.io.AnyWriter) anyerror!
 /// Reads and discards all document content until the start of the root element,
 /// which is the current node after this function returns successfully.
 /// Asserts that the start of the root element has not yet been read.
-pub fn skipProlog(reader: *Reader) anyerror!void {
+pub fn skipProlog(reader: *Reader) ReadError!void {
     assert(reader.state == .start or reader.state == .after_xml_declaration or reader.state == .after_doctype);
     while (true) {
         if (try reader.read() == .element_start) return;
@@ -1476,15 +1814,15 @@ pub fn skipProlog(reader: *Reader) anyerror!void {
 }
 
 test skipProlog {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<?xml version="1.0"?>
         \\<!-- Irrelevant comment -->
         \\<?some-pi?>
         \\<root/>
         \\
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
 
     try reader.skipProlog();
     try expectEqualStrings("root", reader.elementName());
@@ -1497,7 +1835,7 @@ test skipProlog {
 /// element, which is the current node after this function returns successfully.
 /// Asserts that the reader is currently inside an element (not before or after
 /// the root element).
-pub fn skipElement(reader: *Reader) anyerror!void {
+pub fn skipElement(reader: *Reader) ReadError!void {
     assert(reader.state == .in_root or reader.state == .empty_element or reader.state == .empty_root);
     const depth = reader.element_names.items.len;
     while (true) {
@@ -1506,15 +1844,15 @@ pub fn skipElement(reader: *Reader) anyerror!void {
 }
 
 test skipElement {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root>
         \\  <sub>Hello, world!</sub>
         \\  <!-- Some comment -->
         \\</root>
         \\
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
 
     try expectEqual(.element_start, try reader.read());
     try expectEqualStrings("root", reader.elementName());
@@ -1524,21 +1862,21 @@ test skipElement {
 }
 
 /// Reads and discards the rest of the document.
-pub fn skipDocument(reader: *Reader) anyerror!void {
+pub fn skipDocument(reader: *Reader) ReadError!void {
     while (true) {
         if (try reader.read() == .eof) return;
     }
 }
 
 test skipDocument {
-    var doc = xml.StaticDocument.init(
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
         \\<root/>
         \\<!-- A comment -->
         \\<?pi data?>
         \\
-    );
-    var reader = doc.reader(std.testing.allocator, .{});
-    defer reader.deinit();
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
 
     try expectEqual(.element_start, try reader.read());
     try expectEqualStrings("root", reader.elementName());
@@ -1610,7 +1948,7 @@ fn checkXmlVersion(reader: *Reader, version: []const u8, n_attr: usize) !void {
 }
 
 fn checkXmlEncoding(reader: *Reader, encoding: []const u8, n_attr: usize) !void {
-    if (!reader.source.checkEncoding(encoding)) {
+    if (!reader.checkEncoding(encoding)) {
         return reader.fatal(.xml_declaration_encoding_unsupported, reader.attributeValuePos(n_attr));
     }
 }
@@ -2204,7 +2542,7 @@ fn shift(reader: *Reader) !void {
         reader.loc.update(reader.buf[0..reader.pos]);
     }
 
-    reader.buf = try reader.source.move(reader.pos, base_read_size);
+    try reader.move(reader.pos, base_read_size);
     reader.pos = 0;
     reader.spans.clearRetainingCapacity();
     reader.attributes.clearRetainingCapacity();
@@ -2221,7 +2559,7 @@ fn shift(reader: *Reader) !void {
 }
 
 fn more(reader: *Reader) !void {
-    reader.buf = try reader.source.move(0, reader.buf.len * 2);
+    try reader.move(0, reader.buf.len * 2);
 }
 
 fn fatal(reader: *Reader, error_code: ErrorCode, error_pos: usize) error{MalformedXml} {
