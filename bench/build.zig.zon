@@ -13,10 +13,10 @@
         .xml = .{
             .path = "..",
         },
-        .libxml2 = .{
-            .url = "git+https://github.com/ianprime0509/zig-libxml2?ref=main#6cebb963e0ad5789825eb2333a4d21fab8f35a92",
-            .hash = "libxml2-2.12.6-0-AAAAANhXAAAPZyzrjfDHFacBjlxTrUNNsX-QDGIOYjjx",
-        },
+        // .libxml2 = .{
+        //     .url = "git+https://github.com/ianprime0509/zig-libxml2?ref=main#6cebb963e0ad5789825eb2333a4d21fab8f35a92",
+        //     .hash = "libxml2-2.12.6-0-AAAAANhXAAAPZyzrjfDHFacBjlxTrUNNsX-QDGIOYjjx",
+        // },
         .mxml = .{
             .url = "git+https://github.com/michaelrsweet/mxml.git#809204a3051607f54b57e2950f3a5520d79ae383",
             .hash = "N-V-__8AANnGIgA8Oy269gMjyQTBhtFkyegDQ_YdwRL2Damw",

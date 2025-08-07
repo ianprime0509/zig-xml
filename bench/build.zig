@@ -13,11 +13,12 @@ pub fn build(b: *Build) !void {
     bench_streaming_reader.root_module.addImport("xml", xml);
     bench_streaming_reader.linkLibC();
 
-    const libxml2 = b.dependency("libxml2", .{
-        .optimize = .ReleaseFast,
-    });
-    const bench_libxml2 = addBench(b, "libxml2");
-    bench_libxml2.linkLibrary(libxml2.artifact("xml2"));
+    // TODO
+    // const libxml2 = b.dependency("libxml2", .{
+    //     .optimize = .ReleaseFast,
+    // });
+    // const bench_libxml2 = addBench(b, "libxml2");
+    // bench_libxml2.linkLibrary(libxml2.artifact("xml2"));
 
     const yxml = b.dependency("yxml", .{});
     const bench_yxml = addBench(b, "yxml");
@@ -45,7 +46,7 @@ pub fn build(b: *Build) !void {
     });
     bench_mxml.addIncludePath(mxml.path("."));
     const mxml_config = b.addConfigHeader(.{
-        .style = .{ .autoconf = mxml.path("config.h.in") },
+        .style = .{ .autoconf_undef = mxml.path("config.h.in") },
     }, .{
         .HAVE_LONG_LONG_INT = 1,
         .HAVE_SNPRINTF = 1,
