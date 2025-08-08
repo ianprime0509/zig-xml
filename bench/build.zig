@@ -45,7 +45,7 @@ pub fn build(b: *Build) !void {
     });
     bench_mxml.addIncludePath(mxml.path("."));
     const mxml_config = b.addConfigHeader(.{
-        .style = .{ .autoconf = mxml.path("config.h.in") },
+        .style = .{ .autoconf_undef = mxml.path("config.h.in") },
     }, .{
         .HAVE_LONG_LONG_INT = 1,
         .HAVE_SNPRINTF = 1,
