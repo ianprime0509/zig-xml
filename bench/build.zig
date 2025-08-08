@@ -13,12 +13,11 @@ pub fn build(b: *Build) !void {
     bench_streaming_reader.root_module.addImport("xml", xml);
     bench_streaming_reader.linkLibC();
 
-    // TODO
-    // const libxml2 = b.dependency("libxml2", .{
-    //     .optimize = .ReleaseFast,
-    // });
-    // const bench_libxml2 = addBench(b, "libxml2");
-    // bench_libxml2.linkLibrary(libxml2.artifact("xml2"));
+    const libxml2 = b.dependency("libxml2", .{
+        .optimize = .ReleaseFast,
+    });
+    const bench_libxml2 = addBench(b, "libxml2");
+    bench_libxml2.linkLibrary(libxml2.artifact("xml2"));
 
     const yxml = b.dependency("yxml", .{});
     const bench_yxml = addBench(b, "yxml");
