@@ -492,6 +492,7 @@ pub fn StreamingDocument(comptime ReaderType: type) type {
                 @memcpy(doc.buf[doc.avail..][0..can_copy], doc.transcode_buf[0..can_copy]);
                 std.mem.copyForwards(u8, &doc.transcode_buf, doc.transcode_buf[can_copy..]);
                 doc.transcode_buf_len -= can_copy;
+                doc.avail += can_copy;
             }
 
             var read_pos: usize = 0;
