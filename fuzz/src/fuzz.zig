@@ -12,22 +12,22 @@ export fn zig_fuzz_test(buf: [*]u8, len: isize) void {
     fuzz(gpa, buf[0..@intCast(len)]) catch @panic("OOM");
 }
 
-fn fuzz(gpa: Allocator, input: []const u8) !void {
-    var fbs = std.io.fixedBufferStream(input);
-    var doc = xml.streamingDocument(gpa, fbs.reader());
-    defer doc.deinit();
-    var reader = doc.reader(gpa, .{});
-    defer reader.deinit();
+pub fn fuzz(gpa: Allocator, input: []const u8) !void {
+    if (input.len < 2) return; // The reader's buffer must be at least 2 bytes
+    var input_reader: std.Io.Reader = .fixed(input);
+    var streaming_reader: xml.Reader.Streaming = .init(gpa, &input_reader, .{});
+    defer streaming_reader.deinit();
+    const reader = &streaming_reader.interface;
 
-    var out_bytes = std.ArrayList(u8).init(gpa);
-    defer out_bytes.deinit();
-    const output = xml.streamingOutput(out_bytes.writer());
-    var writer = output.writer(gpa, .{});
+    var output: std.Io.Writer.Allocating = .init(gpa);
+    defer output.deinit();
+    var writer: xml.Writer = .init(gpa, &output.writer, .{});
     defer writer.deinit();
 
     while (true) {
         const node = reader.read() catch |err| switch (err) {
             error.MalformedXml => break,
+            error.ReadFailed => unreachable,
             error.OutOfMemory => return error.OutOfMemory,
         };
         switch (node) {

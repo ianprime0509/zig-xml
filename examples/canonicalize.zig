@@ -3,7 +3,7 @@ const log = std.log;
 const xml = @import("xml");
 
 pub fn main() !void {
-    var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    var gpa_state: std.heap.DebugAllocator(.{}) = .{};
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 
@@ -24,14 +24,16 @@ pub fn main() !void {
 
     var input_file = try std.fs.cwd().openFile(input orelse return error.InvalidArguments, .{});
     defer input_file.close();
-    var doc = xml.streamingDocument(gpa, input_file.reader());
-    defer doc.deinit();
-    var reader = doc.reader(gpa, .{});
-    defer reader.deinit();
+    var input_buf: [4096]u8 = undefined;
+    var input_reader = input_file.reader(&input_buf);
+    var streaming_reader: xml.Reader.Streaming = .init(gpa, &input_reader.interface, .{});
+    defer streaming_reader.deinit();
+    const reader = &streaming_reader.interface;
 
-    var stdout_buf = std.io.bufferedWriter(std.io.getStdOut().writer());
-    const stdout_output = xml.streamingOutput(stdout_buf.writer());
-    var writer = stdout_output.writer(gpa, .{
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    const stdout = &stdout_writer.interface;
+    var writer: xml.Writer = .init(gpa, stdout, .{
         .indent = if (pretty) "  " else "",
     });
     defer writer.deinit();
@@ -39,6 +41,7 @@ pub fn main() !void {
     while (true) {
         const node = reader.read() catch |err| switch (err) {
             error.MalformedXml => {
+                try stdout.flush();
                 const loc = reader.errorLocation();
                 log.err("{}:{}: {}", .{ loc.line, loc.column, reader.errorCode() });
                 return error.MalformedXml;
@@ -87,5 +90,5 @@ pub fn main() !void {
         }
     }
 
-    try stdout_buf.flush();
+    try stdout.flush();
 }

@@ -1,6 +1,6 @@
 # zig-xml
 
-zig-xml is an XML library for Zig, currently supporting Zig 0.14.0 and the
+zig-xml is an XML library for Zig, currently supporting Zig 0.15.0 and the
 latest master at the time of writing.
 
 See the documentation in the code for more information about the available APIs

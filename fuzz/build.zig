@@ -1,5 +1,5 @@
 const std = @import("std");
-const afl = @import("zig_afl_kit");
+const afl = @import("afl_kit");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     const xml = b.dependency("xml", .{
         .target = target,
         .optimize = .Debug,
-    });
+    }).module("xml");
 
     const afl_mod = b.createModule(.{
         .root_source_file = b.path("src/fuzz.zig"),
@@ -16,8 +16,11 @@ pub fn build(b: *std.Build) void {
         .stack_check = false,
         .link_libc = true,
         .fuzz = true,
+        .imports = &.{
+            .{ .name = "xml", .module = xml },
+        },
     });
-    afl_mod.addImport("xml", xml.module("xml"));
+
     const afl_obj = b.addObject(.{
         .name = "fuzz-xml",
         .root_module = afl_mod,
@@ -33,4 +36,19 @@ pub fn build(b: *std.Build) void {
     ) orelse return;
     const afl_exe_install = b.addInstallBinFile(afl_exe, "fuzz-xml");
     b.getInstallStep().dependOn(&afl_exe_install.step);
+
+    const repro_mod = b.createModule(.{
+        .root_source_file = b.path("src/repro.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "xml", .module = xml },
+        },
+    });
+
+    const repro_exe = b.addExecutable(.{
+        .name = "fuzz-xml-repro",
+        .root_module = repro_mod,
+    });
+    b.installArtifact(repro_exe);
 }
