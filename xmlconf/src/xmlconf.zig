@@ -324,8 +324,8 @@ fn runTestUnparseable(
     options: TestOptions,
     results: *Results,
 ) !void {
-    if (input.len < 2) return results.skip(id, "TODO: support documents fewer than 2 bytes", .{});
-    var input_reader: std.Io.Reader = .fixed(input);
+    var min_buffer_reader: MinBufferFixedReader(2) = .init(input);
+    var input_reader = min_buffer_reader.reader();
     var streaming_reader: xml.Reader.Streaming = .init(gpa, &input_reader, .{
         .namespace_aware = options.namespace,
     });
@@ -452,3 +452,36 @@ const ArgIterator = struct {
         }
     }
 };
+
+/// A utility wrapper for `std.Io.Reader.fixed` that ensures a minimum buffer
+/// is always available.
+fn MinBufferFixedReader(comptime min_buf_len: usize) type {
+    return union(enum) {
+        direct: []const u8,
+        buffered: struct {
+            buf: [min_buf_len]u8,
+            len: usize,
+        },
+
+        pub fn init(data: []const u8) @This() {
+            if (data.len >= min_buf_len) return .{ .direct = data };
+            var buf: [min_buf_len]u8 = undefined;
+            @memcpy(buf[0..data.len], data);
+            return .{ .buffered = .{
+                .buf = buf,
+                .len = data.len,
+            } };
+        }
+
+        pub fn reader(self: *@This()) std.Io.Reader {
+            return switch (self.*) {
+                .direct => |buf| .fixed(buf),
+                .buffered => |*state| buffered: {
+                    var r: std.Io.Reader = .fixed(&state.buf);
+                    r.end = state.len;
+                    break :buffered r;
+                },
+            };
+        }
+    };
+}
