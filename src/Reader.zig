@@ -295,7 +295,7 @@ pub const Streaming = struct {
     };
 
     /// Asserts that `in` has a buffer of at least 2 bytes.
-    pub fn init(gpa: Allocator, in: *std.io.Reader, options: Options) @This() {
+    pub fn init(gpa: Allocator, in: *std.Io.Reader, options: Options) @This() {
         assert(in.buffer.len >= 2);
         return .{
             .in = in,
@@ -452,7 +452,7 @@ pub const Streaming = struct {
 };
 
 test Streaming {
-    var bytes: std.io.Reader = .fixed(
+    var bytes: std.Io.Reader = .fixed(
         \\<?xml version="1.0"?>
         \\<root>Hello, 世界 👋!</root>
         \\
@@ -485,7 +485,7 @@ test "streaming with UTF-16LE" {
 }
 
 fn testStreamingUtf16(comptime endian: std.builtin.Endian) !void {
-    var bytes: std.io.Reader = .fixed(utf16BytesLiteral(endian, "\u{FEFF}" ++
+    var bytes: std.Io.Reader = .fixed(utf16BytesLiteral(endian, "\u{FEFF}" ++
         \\<?xml version="1.0"?>
         \\<root>Hello, 世界 👋!</root>
         \\
