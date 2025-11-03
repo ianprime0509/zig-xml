@@ -14,7 +14,7 @@ const usage =
     \\
 ;
 
-var log_tty_config: std.io.tty.Config = undefined; // Will be initialized immediately in main
+var log_tty_config: std.Io.tty.Config = undefined; // Will be initialized immediately in main
 var log_level: std.log.Level = .warn;
 
 pub const std_options: std.Options = .{
@@ -48,7 +48,7 @@ pub fn logImpl(
 }
 
 pub fn main() !void {
-    log_tty_config = std.io.tty.detectConfig(std.fs.File.stderr());
+    log_tty_config = std.Io.tty.detectConfig(std.fs.File.stderr());
 
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
@@ -137,7 +137,7 @@ const max_file_size = 2 * 1024 * 1024;
 fn runFile(gpa: Allocator, path: []const u8, results: *Results) !void {
     var dir = try std.fs.cwd().openDir(std.fs.path.dirname(path) orelse ".", .{});
     defer dir.close();
-    const data = try dir.readFileAlloc(gpa, std.fs.path.basename(path), max_file_size);
+    const data = try readFileAlloc(dir, std.fs.path.basename(path), gpa, .limited(max_file_size));
     defer gpa.free(data);
     var data_reader: std.Io.Reader = .fixed(data);
     var streaming_reader: xml.Reader.Streaming = .init(gpa, &data_reader, .{});
@@ -202,14 +202,14 @@ fn runTest(gpa: Allocator, dir: std.fs.Dir, reader: *xml.Reader, results: *Resul
     const input = input: {
         const index = reader.attributeIndex("URI") orelse return error.InvalidTest;
         const path = try reader.attributeValue(index);
-        break :input dir.readFileAlloc(gpa, path, max_file_size) catch |err|
+        break :input readFileAlloc(dir, path, gpa, .limited(max_file_size)) catch |err|
             return results.err("{s}: reading input file: {s}: {}", .{ id, path, err });
     };
     defer gpa.free(input);
     const output = output: {
         const index = reader.attributeIndex("OUTPUT") orelse break :output null;
         const path = try reader.attributeValue(index);
-        break :output dir.readFileAlloc(gpa, path, max_file_size) catch |err|
+        break :output readFileAlloc(dir, path, gpa, .limited(max_file_size)) catch |err|
             return results.err("{s}: reading output file: {s}: {}", .{ id, path, err });
     };
     defer if (output) |o| gpa.free(o);
@@ -351,6 +351,19 @@ const TestType = enum {
     @"not-wf",
     @"error",
 };
+
+fn readFileAlloc(
+    dir: std.fs.Dir,
+    sub_path: []const u8,
+    gpa: Allocator,
+    limit: std.Io.Limit,
+) ![]u8 {
+    if (@import("builtin").zig_version.minor == 15) {
+        return dir.readFileAlloc(gpa, sub_path, @intFromEnum(limit));
+    } else {
+        return dir.readFileAlloc(sub_path, gpa, limit);
+    }
+}
 
 // Inspired by https://github.com/judofyr/parg
 const ArgIterator = struct {

@@ -8,8 +8,23 @@ pub fn main() !void {
     if (args.len != 2) {
         return error.InvalidArguments;
     }
-    const data = try std.fs.cwd().readFileAllocOptions(allocator, args[1], std.math.maxInt(usize), null, .of(u8), 0);
+    const data = try readFileAllocOptions(std.fs.cwd(), args[1], allocator, .unlimited, .of(u8), 0);
     defer allocator.free(data);
 
     try @import("root").runBench(data);
+}
+
+fn readFileAllocOptions(
+    dir: std.fs.Dir,
+    sub_path: []const u8,
+    gpa: std.mem.Allocator,
+    limit: std.Io.Limit,
+    comptime alignment: std.mem.Alignment,
+    comptime sentinel: ?u8,
+) !(if (sentinel) |s| [:s]align(alignment.toByteUnits()) u8 else []align(alignment.toByteUnits()) u8) {
+    if (@import("builtin").zig_version.minor == 15) {
+        return dir.readFileAllocOptions(gpa, sub_path, @intFromEnum(limit), null, alignment, sentinel);
+    } else {
+        return dir.readFileAllocOptions(sub_path, gpa, limit, alignment, sentinel);
+    }
 }
