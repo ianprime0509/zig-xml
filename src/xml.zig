@@ -2,28 +2,89 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const expectEqual = std.testing.expectEqual;
+const expectEqualDeep = std.testing.expectEqualDeep;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
 const xml = @This();
 
+/// A line and column position in an XML document.
+///
+/// The meaning of "column" is chosen by the function used to update the
+/// location in the reader.
 pub const Location = struct {
     line: usize,
     column: usize,
 
     pub const start: Location = .{ .line = 1, .column = 1 };
 
-    pub fn update(loc: *Location, s: []const u8) void {
+    /// A function which updates a location from the beginning of a document
+    /// slice to its end.
+    pub const UpdateFn = *const fn (*Location, []const u8) void;
+
+    /// Updates the location, using bytes (UTF-8 code units) when counting
+    /// columns.
+    pub fn updateBytes(loc: *Location, s: []const u8) void {
         var pos: usize = 0;
-        while (std.mem.indexOfAnyPos(u8, s, pos, "\r\n")) |nl_pos| {
+        while (std.mem.indexOfScalarPos(u8, s, pos, '\n')) |nl_pos| {
             loc.line += 1;
             loc.column = 1;
-            if (s[nl_pos] == '\r' and nl_pos + 1 < s.len and s[nl_pos + 1] == '\n') {
-                pos = nl_pos + 2;
-            } else {
-                pos = nl_pos + 1;
-            }
+            pos = nl_pos + 1;
         }
         loc.column += s.len - pos;
+    }
+
+    test updateBytes {
+        var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+            \\<root>こんにちは</root>
+        , .{ .updateLocation = xml.Location.updateBytes });
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+
+        try expectEqual(.element_start, try reader.read());
+        try expectEqualDeep(Location{ .line = 1, .column = 1 }, reader.location());
+
+        try expectEqual(.text, try reader.read());
+        try expectEqualDeep(Location{ .line = 1, .column = 7 }, reader.location());
+
+        try expectEqual(.element_end, try reader.read());
+        try expectEqualDeep(Location{ .line = 1, .column = 22 }, reader.location());
+
+        try expectEqual(.eof, try reader.read());
+        try expectEqualDeep(Location{ .line = 1, .column = 29 }, reader.location());
+    }
+
+    /// Updates the location, using Unicode codepoints when counting columns.
+    pub fn updateCodepoints(loc: *Location, s: []const u8) void {
+        var pos: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, s, pos, '\n')) |nl_pos| {
+            loc.line += 1;
+            loc.column = 1;
+            pos = nl_pos + 1;
+        }
+        while (pos < s.len) {
+            pos += std.unicode.utf8ByteSequenceLength(s[pos]) catch 1;
+            loc.column += 1;
+        }
+    }
+
+    test updateCodepoints {
+        var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+            \\<root>こんにちは</root>
+        , .{ .updateLocation = xml.Location.updateCodepoints });
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+
+        try expectEqual(.element_start, try reader.read());
+        try expectEqualDeep(Location{ .line = 1, .column = 1 }, reader.location());
+
+        try expectEqual(.text, try reader.read());
+        try expectEqualDeep(Location{ .line = 1, .column = 7 }, reader.location());
+
+        try expectEqual(.element_end, try reader.read());
+        try expectEqualDeep(Location{ .line = 1, .column = 12 }, reader.location());
+
+        try expectEqual(.eof, try reader.read());
+        try expectEqualDeep(Location{ .line = 1, .column = 19 }, reader.location());
     }
 
     pub fn format(loc: Location, writer: *std.Io.Writer) std.Io.Writer.Error!void {

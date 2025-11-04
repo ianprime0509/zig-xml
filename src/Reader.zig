@@ -109,10 +109,11 @@ pub const Options = struct {
     /// names. The `Ns`-suffixed functions of `Reader` may only be used when
     /// this is enabled.
     namespace_aware: bool = true,
-    /// Whether the reader should track the source location (line and column)
-    /// of nodes in the document. The `location` functions of `Reader` may only
-    /// be used when this is enabled.
-    location_aware: bool = true,
+    /// The function to use to update the reader's current location in the
+    /// document. This may be set to null, in which case the reader is not
+    /// location-aware, and using functions which access the location are
+    /// checked illegal behavior.
+    updateLocation: ?xml.Location.UpdateFn = xml.Location.updateBytes,
     /// Whether the reader may assume that its input data is valid UTF-8.
     assume_valid_utf8: bool = false,
 };
@@ -549,7 +550,7 @@ pub fn init(gpa: Allocator, options: Options, vtable: *const VTable) Reader {
         .character = undefined,
 
         .vtable = vtable,
-        .loc = if (options.location_aware) Location.start else undefined,
+        .loc = if (options.updateLocation != null) Location.start else undefined,
         .buf = &.{},
         .pos = 0,
 
@@ -578,7 +579,7 @@ pub fn deinit(reader: *Reader) void {
 /// Returns the location of the node.
 /// Asserts that the reader is location-aware and there is a current node (`read` was called and did not return an error).
 pub fn location(reader: Reader) Location {
-    assert(reader.options.location_aware and reader.node != null);
+    assert(reader.options.updateLocation != null and reader.node != null);
     return reader.loc;
 }
 
@@ -611,6 +612,9 @@ test location {
 
     try expectEqual(.element_end, try reader.read());
     try expectEqualDeep(Location{ .line = 3, .column = 1 }, reader.location());
+
+    try expectEqual(.eof, try reader.read());
+    try expectEqualDeep(Location{ .line = 3, .column = 8 }, reader.location());
 }
 
 /// Returns the error code associated with the error.
@@ -640,7 +644,7 @@ test errorCode {
 pub fn errorLocation(reader: Reader) Location {
     assert(reader.state == .invalid);
     var loc = reader.loc;
-    loc.update(reader.buf[0..reader.error_pos]);
+    reader.options.updateLocation.?(&loc, reader.buf[0..reader.error_pos]);
     return loc;
 }
 
@@ -1035,9 +1039,9 @@ fn attributeValueEndPos(reader: Reader, n: usize) usize {
 /// Returns the location of the `n`th attribute of the element.
 /// Asserts that the reader is location-aware, the current node is `Node.element_start`, and `n` is less than `reader.nAttributes()`.
 pub fn attributeLocation(reader: Reader, n: usize) Location {
-    assert(reader.options.location_aware and reader.node == .element_start and n < reader.attributeCount());
+    assert(reader.node == .element_start and n < reader.attributeCount());
     var loc = reader.loc;
-    loc.update(reader.buf[0..reader.attributeNamePos(n)]);
+    reader.options.updateLocation.?(&loc, reader.buf[0..reader.attributeNamePos(n)]);
     return loc;
 }
 
@@ -2538,8 +2542,8 @@ fn fatalInvalidUtf8(reader: *Reader, s: []const u8, pos: usize) error{MalformedX
 const base_read_size = 4096;
 
 fn shift(reader: *Reader) !void {
-    if (reader.options.location_aware) {
-        reader.loc.update(reader.buf[0..reader.pos]);
+    if (reader.options.updateLocation) |updateLocation| {
+        updateLocation(&reader.loc, reader.buf[0..reader.pos]);
     }
 
     try reader.move(reader.pos, base_read_size);
