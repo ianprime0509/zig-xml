@@ -651,23 +651,8 @@ test pi {
 /// in the resulting XML.
 /// Asserts that the writer is in an element.
 pub fn text(writer: *Writer, s: []const u8) WriteError!void {
-    switch (writer.state) {
-        .after_structure_end, .text => {},
-        .element_start => try writer.write(">"),
-        .start, .after_bom, .after_xml_declaration, .end, .eof => unreachable,
-    }
-    var pos: usize = 0;
-    while (std.mem.indexOfAnyPos(u8, s, pos, "&<")) |esc_pos| {
-        try writer.write(s[pos..esc_pos]);
-        try writer.write(switch (s[esc_pos]) {
-            '&' => "&amp;",
-            '<' => "&lt;",
-            else => unreachable,
-        });
-        pos = esc_pos + 1;
-    }
-    try writer.write(s[pos..]);
-    writer.state = .text;
+    try writer.textStart();
+    try writer.textWrite(s);
 }
 
 test text {
@@ -687,6 +672,89 @@ test text {
         \\&lt;/root></root>
         \\
     , bytes.written());
+}
+
+pub const TextWriter = struct {
+    writer: *Writer,
+    interface: std.Io.Writer,
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const tw: *TextWriter = @fieldParentPtr("interface", w);
+        try tw.writer.textWrite(tw.interface.buffered());
+        tw.interface.end = 0;
+        var written: usize = 0;
+        for (data[0 .. data.len - 1]) |s| {
+            try tw.writer.textWrite(s);
+            written += s.len;
+        }
+        for (0..splat) |_| {
+            try tw.writer.textWrite(data[data.len - 1]);
+            written += data[data.len - 1].len;
+        }
+        return written;
+    }
+};
+
+pub fn textWriter(writer: *Writer, buffer: []u8) WriteError!TextWriter {
+    try writer.textStart();
+    return .{
+        .writer = writer,
+        .interface = .{
+            .vtable = &.{
+                .drain = TextWriter.drain,
+            },
+            .buffer = buffer,
+        },
+    };
+}
+
+test textWriter {
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var writer: xml.Writer = .init(std.testing.allocator, &bytes.writer, .{ .indent = "  " });
+    defer writer.deinit();
+
+    try writer.elementStart("root");
+    // The buffer is intentionally not large enough to hold all the written
+    // bytes, for example purposes.
+    var buf: [16]u8 = undefined;
+    var tw = try writer.textWriter(&buf);
+    const text_writer = &tw.interface;
+    try text_writer.print("0xFF & 0x30 = 0x{X:0>2}\n", .{0xFF & 0x30});
+    try text_writer.writeAll("<root>1 + 1 < 3</root>");
+    try text_writer.flush();
+    try writer.elementEnd();
+    try writer.eof();
+
+    try expectEqualStrings(
+        \\<root>0xFF &amp; 0x30 = 0x30
+        \\&lt;root>1 + 1 &lt; 3&lt;/root></root>
+        \\
+    , bytes.written());
+}
+
+fn textStart(writer: *Writer) !void {
+    switch (writer.state) {
+        .after_structure_end, .text => {},
+        .element_start => try writer.write(">"),
+        .start, .after_bom, .after_xml_declaration, .end, .eof => unreachable,
+    }
+    writer.state = .text;
+}
+
+fn textWrite(writer: *Writer, s: []const u8) !void {
+    assert(writer.state == .text);
+    var pos: usize = 0;
+    while (std.mem.indexOfAnyPos(u8, s, pos, "&<")) |esc_pos| {
+        try writer.write(s[pos..esc_pos]);
+        try writer.write(switch (s[esc_pos]) {
+            '&' => "&amp;",
+            '<' => "&lt;",
+            else => unreachable,
+        });
+        pos = esc_pos + 1;
+    }
+    try writer.write(s[pos..]);
 }
 
 /// Writes a CDATA node.
