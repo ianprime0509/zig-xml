@@ -101,9 +101,9 @@ pub fn init(gpa: Allocator, writer: *std.Io.Writer, options: Options) Writer {
         .options = options,
 
         .state = .start,
-        .strings = .{},
-        .element_names = .{},
-        .ns_prefixes = .{},
+        .strings = .empty,
+        .element_names = .empty,
+        .ns_prefixes = .empty,
         .pending_ns = .{},
         .gen_ns_prefix_counter = 0,
 
