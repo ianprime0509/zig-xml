@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const log = std.log;
+
 const xml = @import("xml");
 
 const usage =
@@ -14,7 +15,7 @@ const usage =
     \\
 ;
 
-var log_tty_config: std.io.tty.Config = undefined; // Will be initialized immediately in main
+var log_tty_config: std.Io.tty.Config = undefined; // Will be initialized immediately in main
 var log_level: std.log.Level = .warn;
 
 pub const std_options: std.Options = .{
@@ -34,7 +35,7 @@ pub fn logImpl(
     else
         comptime level.asText() ++ "(" ++ @tagName(scope) ++ "): ";
     var buffer: [64]u8 = undefined;
-    const stderr = std.debug.lockStderrWriter(&buffer);
+    const stderr, _ = std.debug.lockStderrWriter(&buffer);
     defer std.debug.unlockStderrWriter();
     log_tty_config.setColor(stderr, switch (level) {
         .err => .bright_red,
@@ -48,7 +49,7 @@ pub fn logImpl(
 }
 
 pub fn main() !void {
-    log_tty_config = std.io.tty.detectConfig(std.fs.File.stderr());
+    log_tty_config = std.Io.tty.detectConfig(std.fs.File.stderr());
 
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
@@ -135,10 +136,18 @@ const Results = struct {
 const max_file_size = 2 * 1024 * 1024;
 
 fn runFile(gpa: Allocator, path: []const u8, results: *Results) !void {
-    var dir = try std.fs.cwd().openDir(std.fs.path.dirname(path) orelse ".", .{});
-    defer dir.close();
-    const data = try dir.readFileAlloc(gpa, std.fs.path.basename(path), max_file_size);
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, std.fs.path.dirname(path) orelse ".", .{});
+    defer dir.close(std.testing.io);
+
+    const file = try dir.openFile(std.testing.io, std.fs.path.basename(path), .{});
+    defer file.close(std.testing.io);
+
+    var file_buf: [1024]u8 = undefined;
+    var file_reader = file.reader(std.testing.io, &file_buf);
+
+    const data = try file_reader.interface.allocRemaining(gpa, .unlimited);
     defer gpa.free(data);
+
     var data_reader: std.Io.Reader = .fixed(data);
     var streaming_reader: xml.Reader.Streaming = .init(gpa, &data_reader, .{});
     defer streaming_reader.deinit();
@@ -149,7 +158,7 @@ fn runFile(gpa: Allocator, path: []const u8, results: *Results) !void {
     try runSuite(gpa, dir, reader, results);
 }
 
-fn runSuite(gpa: Allocator, dir: std.fs.Dir, reader: *xml.Reader, results: *Results) !void {
+fn runSuite(gpa: Allocator, dir: std.Io.Dir, reader: *xml.Reader, results: *Results) !void {
     if (reader.attributeIndex("PROFILE")) |profile_attr| {
         log.info("suite: {s}", .{try reader.attributeValue(profile_attr)});
     }
@@ -169,7 +178,7 @@ fn runSuite(gpa: Allocator, dir: std.fs.Dir, reader: *xml.Reader, results: *Resu
     }
 }
 
-fn runTest(gpa: Allocator, dir: std.fs.Dir, reader: *xml.Reader, results: *Results) !void {
+fn runTest(gpa: Allocator, dir: std.Io.Dir, reader: *xml.Reader, results: *Results) !void {
     const @"type" = type: {
         const index = reader.attributeIndex("TYPE") orelse return error.InvalidTest;
         break :type std.meta.stringToEnum(TestType, try reader.attributeValue(index)) orelse return error.InvalidTest;
@@ -202,25 +211,29 @@ fn runTest(gpa: Allocator, dir: std.fs.Dir, reader: *xml.Reader, results: *Resul
     const input = input: {
         const index = reader.attributeIndex("URI") orelse return error.InvalidTest;
         const path = try reader.attributeValue(index);
-        break :input dir.readFileAlloc(gpa, path, max_file_size) catch |err|
+        const buf = try gpa.alloc(u8, max_file_size);
+        const input = dir.readFile(std.testing.io, path, buf) catch |err|
             return results.err("{s}: reading input file: {s}: {}", .{ id, path, err });
+        break :input .{ .parent = buf, .data = input };
     };
-    defer gpa.free(input);
-    const output = output: {
-        const index = reader.attributeIndex("OUTPUT") orelse break :output null;
+    defer gpa.free(input.parent);
+    const output: struct { parent: ?[]u8, data: ?[]u8 } = output: {
+        const index = reader.attributeIndex("OUTPUT") orelse break :output .{ .parent = null, .data = null };
         const path = try reader.attributeValue(index);
-        break :output dir.readFileAlloc(gpa, path, max_file_size) catch |err|
+        const buf = try gpa.alloc(u8, max_file_size);
+        const output: ?[]u8 = dir.readFile(std.testing.io, path, buf) catch |err|
             return results.err("{s}: reading output file: {s}: {}", .{ id, path, err });
+        break :output .{ .parent = buf, .data = output };
     };
-    defer if (output) |o| gpa.free(o);
+    defer if (output.parent) |o| gpa.free(o);
     try reader.skipElement();
 
     const options: TestOptions = .{
         .namespace = namespace == .yes,
     };
     switch (@"type") {
-        .valid, .invalid => try runTestParseable(gpa, id, input, output, options, results),
-        .@"not-wf" => try runTestUnparseable(gpa, id, input, options, results),
+        .valid, .invalid => try runTestParseable(gpa, id, input.data, output.data, options, results),
+        .@"not-wf" => try runTestUnparseable(gpa, id, input.data, options, results),
         .@"error" => results.skip(id, "not sure how to run error tests", .{}),
     }
 }
