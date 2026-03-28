@@ -101,10 +101,10 @@ pub fn init(gpa: Allocator, writer: *std.Io.Writer, options: Options) Writer {
         .options = options,
 
         .state = .start,
-        .strings = .{},
-        .element_names = .{},
-        .ns_prefixes = .{},
-        .pending_ns = .{},
+        .strings = .empty,
+        .element_names = .empty,
+        .ns_prefixes = .empty,
+        .pending_ns = .empty,
         .gen_ns_prefix_counter = 0,
 
         .out = writer,
@@ -330,7 +330,7 @@ fn elementStartInternal(writer: *Writer, prefix: []const u8, local: []const u8) 
     writer.state = .element_start;
 
     if (writer.options.namespace_aware) {
-        var ns_prefixes: std.AutoArrayHashMapUnmanaged(StringIndex, StringIndex) = .{};
+        var ns_prefixes: std.AutoArrayHashMapUnmanaged(StringIndex, StringIndex) = .empty;
         try ns_prefixes.ensureUnusedCapacity(writer.gpa, writer.pending_ns.count());
         var pending_ns_iter = writer.pending_ns.iterator();
         while (pending_ns_iter.next()) |pending_ns| {
