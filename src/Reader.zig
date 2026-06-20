@@ -521,17 +521,17 @@ inline fn utf16BytesLiteral(comptime endian: std.builtin.Endian, comptime utf8: 
 }
 
 test "streaming with extremely long element name" {
-    const name = "a" ** 65536;
+    const name: [65536]u8 = @splat('a');
     var bytes: std.Io.Reader = .fixed("<" ++ name ++ "/>");
     var streaming_reader: xml.Reader.Streaming = .init(std.testing.allocator, &bytes, .{});
     defer streaming_reader.deinit();
     const reader = &streaming_reader.interface;
 
     try expectEqual(.element_start, try reader.read());
-    try expectEqualStrings(name, reader.elementName());
+    try expectEqualStrings(&name, reader.elementName());
 
     try expectEqual(.element_end, try reader.read());
-    try expectEqualStrings(name, reader.elementName());
+    try expectEqualStrings(&name, reader.elementName());
 
     try expectEqual(.eof, try reader.read());
 }
@@ -2148,7 +2148,12 @@ fn addAttributeValueString(reader: *Reader, raw_value: []const u8) !StringIndex 
 }
 
 fn checkElementEnd(reader: *Reader) !void {
-    const element_name = reader.string(reader.element_names.getLast());
+    const element_name = if (@hasDecl(@TypeOf(reader.element_names), "last")) // zig 0.17
+        reader.string((reader.element_names.last() orelse {
+            return reader.fatal(.element_end_mismatched, reader.elementNamePos());
+        }).*)
+    else
+        reader.string(reader.element_names.getLast());
     if (!std.mem.eql(u8, reader.elementNameUnchecked(), element_name)) {
         return reader.fatal(.element_end_mismatched, reader.elementNamePos());
     }
