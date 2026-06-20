@@ -542,8 +542,8 @@ pub fn init(gpa: Allocator, options: Options, vtable: *const VTable) Reader {
 
         .state = .start,
         .spans = .empty,
-        .attributes = .{},
-        .q_attributes = .{},
+        .attributes = .empty,
+        .q_attributes = .empty,
         .strings = .empty,
         .element_names = .empty,
         .ns_prefixes = .empty,
