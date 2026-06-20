@@ -1,4 +1,7 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const Writer = Io.Writer;
 const xml = @import("xml");
 
 // deinit functions are omitted for brevity; this example uses an arena to
@@ -7,7 +10,7 @@ const xml = @import("xml");
 const Document = struct {
     root_nodes: []const Node,
 
-    fn parse(arena: std.mem.Allocator, reader: *xml.Reader) !Document {
+    fn parse(arena: Allocator, reader: *xml.Reader) !Document {
         var root_nodes: std.ArrayList(Node) = .empty;
         while (true) {
             const node = try reader.read();
@@ -24,7 +27,7 @@ const Document = struct {
         return .{ .root_nodes = try root_nodes.toOwnedSlice(arena) };
     }
 
-    fn parseElement(arena: std.mem.Allocator, reader: *xml.Reader) !Node.Element {
+    fn parseElement(arena: Allocator, reader: *xml.Reader) !Node.Element {
         const name = try arena.dupe(u8, reader.elementName());
         var attributes: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
         for (0..reader.attributeCount()) |i| {
@@ -36,7 +39,7 @@ const Document = struct {
         }
 
         var children: std.ArrayList(Node) = .empty;
-        var text: std.Io.Writer.Allocating = .init(arena);
+        var text: Writer.Allocating = .init(arena);
         while (true) {
             const node = try reader.read();
             switch (node) {
@@ -85,22 +88,22 @@ const Document = struct {
         };
     }
 
-    fn parsePi(arena: std.mem.Allocator, reader: *xml.Reader) !Node.Pi {
+    fn parsePi(arena: Allocator, reader: *xml.Reader) !Node.Pi {
         const target = try arena.dupe(u8, reader.piTarget());
-        var data: std.Io.Writer.Allocating = .init(arena);
+        var data: Writer.Allocating = .init(arena);
         reader.piDataWrite(&data.writer) catch |err| switch (err) {
             error.WriteFailed => return error.OutOfMemory,
         };
         return .{ .target = target, .data = try data.toOwnedSlice() };
     }
 
-    fn dump(document: Document, writer: *std.Io.Writer) !void {
+    fn dump(document: Document, writer: *Writer) !void {
         for (document.root_nodes) |node| {
             try dumpNode(node, writer, 0);
         }
     }
 
-    fn dumpNode(node: Node, writer: *std.Io.Writer, indent: usize) std.Io.Writer.Error!void {
+    fn dumpNode(node: Node, writer: *Writer, indent: usize) Writer.Error!void {
         switch (node) {
             .element => |element| try dumpElement(element, writer, indent),
             .pi => |pi| try dumpPi(pi, writer, indent),
@@ -108,7 +111,7 @@ const Document = struct {
         }
     }
 
-    fn dumpElement(element: Node.Element, writer: *std.Io.Writer, indent: usize) !void {
+    fn dumpElement(element: Node.Element, writer: *Writer, indent: usize) !void {
         try dumpIndent(writer, indent);
         try writer.print("<{s}", .{element.name});
         for (element.attributes.keys(), element.attributes.values()) |name, value| {
@@ -120,12 +123,12 @@ const Document = struct {
         }
     }
 
-    fn dumpPi(pi: Node.Pi, writer: *std.Io.Writer, indent: usize) !void {
+    fn dumpPi(pi: Node.Pi, writer: *Writer, indent: usize) !void {
         try dumpIndent(writer, indent);
         try writer.print("<?{s} {s}?>", .{ pi.target, pi.data });
     }
 
-    fn dumpText(text: []const u8, writer: *std.Io.Writer, indent: usize) !void {
+    fn dumpText(text: []const u8, writer: *Writer, indent: usize) !void {
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |line| {
             try dumpIndent(writer, indent);
@@ -133,7 +136,7 @@ const Document = struct {
         }
     }
 
-    fn dumpIndent(writer: *std.Io.Writer, indent: usize) !void {
+    fn dumpIndent(writer: *Writer, indent: usize) !void {
         for (0..indent) |_| {
             try writer.writeAll("  ");
         }
@@ -157,31 +160,24 @@ const Node = union(enum) {
     };
 };
 
-pub fn main() !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa_state.deinit();
-    const gpa = gpa_state.allocator();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const arena = init.arena.allocator();
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
-    if (args.len != 2) {
-        return error.InvalidArguments; // usage: tree file
-    }
+    const args = try init.minimal.args.toSlice(arena);
+    if (args.len != 2) return error.InvalidArguments; // usage: tree file
 
-    var input_file = try std.fs.cwd().openFile(args[1], .{});
-    defer input_file.close();
+    var input_file = try Io.Dir.cwd().openFile(io, args[1], .{});
+    defer input_file.close(io);
     var input_buf: [4096]u8 = undefined;
-    var input_reader = input_file.reader(&input_buf);
+    var input_reader = input_file.reader(io, &input_buf);
     var streaming_reader: xml.Reader.Streaming = .init(gpa, &input_reader.interface, .{});
     defer streaming_reader.deinit();
     const reader = &streaming_reader.interface;
 
-    var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
 
     const document: Document = try .parse(arena, reader);

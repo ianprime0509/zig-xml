@@ -2,7 +2,7 @@
     .name = .xml_bench,
     .version = "0.0.0",
     .fingerprint = 0xf7a84882b8ff81a4, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.16.0",
     .paths = .{
         "src",
         "lib",
@@ -14,8 +14,8 @@
             .path = "..",
         },
         .libxml2 = .{
-            .url = "git+https://github.com/ianprime0509/zig-libxml2?ref=main#1c0b9f4ed973dd78644dd424f1ed89aa1a1d86fb",
-            .hash = "libxml2-2.12.6-0-_uu2QVJdAADU16e2xNca0zQyk3Lszmb6tfJESRcimhhn",
+            .url = "git+https://github.com/ianprime0509/zig-libxml2?ref=main#5cf16c3c5abb110721d45fdcbe957c5651ecff2a",
+            .hash = "libxml2-2.12.6-0-_uu2QSRdAAA_t8w7V8hSK4N9tTNknkoMN5GucTaUG2ec",
         },
         .mxml = .{
             .url = "git+https://github.com/michaelrsweet/mxml.git#809204a3051607f54b57e2950f3a5520d79ae383",

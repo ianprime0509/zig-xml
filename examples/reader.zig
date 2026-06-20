@@ -1,28 +1,26 @@
 const std = @import("std");
+const Io = std.Io;
 const log = std.log;
 const xml = @import("xml");
 
-pub fn main() !void {
-    var gpa_state: std.heap.DebugAllocator(.{}) = .{};
-    defer _ = gpa_state.deinit();
-    const gpa = gpa_state.allocator();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const arena = init.arena.allocator();
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
-    if (args.len != 2) {
-        return error.InvalidArguments; // usage: reader file
-    }
+    const args = try init.minimal.args.toSlice(arena);
+    if (args.len != 2) return error.InvalidArguments; // usage: reader file
 
-    var input_file = try std.fs.cwd().openFile(args[1], .{});
-    defer input_file.close();
+    var input_file = try Io.Dir.cwd().openFile(io, args[1], .{});
+    defer input_file.close(io);
     var input_buf: [4096]u8 = undefined;
-    var input_reader = input_file.reader(&input_buf);
+    var input_reader = input_file.reader(io, &input_buf);
     var streaming_reader: xml.Reader.Streaming = .init(gpa, &input_reader.interface, .{});
     defer streaming_reader.deinit();
     const reader = &streaming_reader.interface;
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
 
     while (true) {

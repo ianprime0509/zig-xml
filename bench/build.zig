@@ -7,28 +7,28 @@ pub fn build(b: *Build) !void {
 
     const bench_reader = addBench(b, "reader");
     bench_reader.root_module.addImport("xml", xml);
-    bench_reader.linkLibC();
+    bench_reader.root_module.link_libc = true;
 
     const bench_streaming_reader = addBench(b, "streaming_reader");
     bench_streaming_reader.root_module.addImport("xml", xml);
-    bench_streaming_reader.linkLibC();
+    bench_streaming_reader.root_module.link_libc = true;
 
     const libxml2 = b.dependency("libxml2", .{
         .optimize = .ReleaseFast,
     });
     const bench_libxml2 = addBench(b, "libxml2");
-    bench_libxml2.linkLibrary(libxml2.artifact("xml2"));
+    bench_libxml2.root_module.linkLibrary(libxml2.artifact("xml2"));
 
     const yxml = b.dependency("yxml", .{});
     const bench_yxml = addBench(b, "yxml");
-    bench_yxml.linkLibC();
-    bench_yxml.addCSourceFile(.{ .file = yxml.path("yxml.c"), .flags = &.{} });
-    bench_yxml.addIncludePath(yxml.path("."));
+    bench_yxml.root_module.link_libc = true;
+    bench_yxml.root_module.addCSourceFile(.{ .file = yxml.path("yxml.c"), .flags = &.{} });
+    bench_yxml.root_module.addIncludePath(yxml.path("."));
 
     const mxml = b.dependency("mxml", .{});
     const bench_mxml = addBench(b, "mxml");
-    bench_mxml.linkLibC();
-    bench_mxml.addCSourceFiles(.{
+    bench_mxml.root_module.link_libc = true;
+    bench_mxml.root_module.addCSourceFiles(.{
         .root = mxml.path("."),
         .files = &.{
             "mxml-attr.c",
@@ -43,7 +43,7 @@ pub fn build(b: *Build) !void {
             "mxml-string.c",
         },
     });
-    bench_mxml.addIncludePath(mxml.path("."));
+    bench_mxml.root_module.addIncludePath(mxml.path("."));
     const mxml_config = b.addConfigHeader(.{
         .style = .{ .autoconf_undef = mxml.path("config.h.in") },
     }, .{
@@ -56,7 +56,7 @@ pub fn build(b: *Build) !void {
         .HAVE_STRLCPY = null,
         .HAVE_PTHREAD_H = null,
     });
-    bench_mxml.addConfigHeader(mxml_config);
+    bench_mxml.root_module.addConfigHeader(mxml_config);
 }
 
 fn addBench(b: *Build, name: []const u8) *Step.Compile {

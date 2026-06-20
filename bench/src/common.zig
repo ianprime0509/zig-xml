@@ -1,15 +1,13 @@
 const std = @import("std");
+const Io = std.Io;
 
-pub fn main() !void {
-    const allocator = std.heap.c_allocator;
+pub fn main(init: std.process.Init) !void {
+    const arena = init.arena.allocator();
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-    if (args.len != 2) {
-        return error.InvalidArguments;
-    }
-    const data = try std.fs.cwd().readFileAllocOptions(allocator, args[1], std.math.maxInt(usize), null, .of(u8), 0);
-    defer allocator.free(data);
+    const args = try init.minimal.args.toSlice(arena);
+    if (args.len != 2) return error.InvalidArguments;
+    const data = try Io.Dir.cwd().readFileAllocOptions(io, args[1], arena, .unlimited, .of(u8), 0);
 
     try @import("root").runBench(data);
 }
