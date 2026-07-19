@@ -1679,6 +1679,145 @@ test "namespace binding xmlns prefix is invalid" {
     try expectEqual(.namespace_binding_illegal, reader.errorCode());
 }
 
+test "element name starting with valid multi-byte character" {
+    const cp = "\u{05D0}"; // Hebrew alef
+
+    // As an unprefixed element name.
+    {
+        var static_reader: xml.Reader.Static = .init(
+            std.testing.allocator,
+            "<" ++ cp ++ "/>",
+            .{},
+        );
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+        try expectEqual(.element_start, try reader.read());
+        try expectEqualStrings(cp, reader.elementName());
+        try expectEqual(.element_end, try reader.read());
+        try expectEqual(.eof, try reader.read());
+    }
+
+    // As a namespace prefix.
+    {
+        var static_reader: xml.Reader.Static = .init(
+            std.testing.allocator,
+            "<" ++ cp ++ ":elem xmlns:" ++ cp ++ "=\"https://example.com/ns\"/>",
+            .{},
+        );
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+        try expectEqual(.element_start, try reader.read());
+        try expectEqualStrings(cp, reader.elementNameNs().prefix);
+        try expectEqual(.element_end, try reader.read());
+        try expectEqual(.eof, try reader.read());
+    }
+}
+
+test "element name containing valid multi-byte character" {
+    const cp = "\u{05D0}"; // Hebrew alef
+
+    // As an unprefixed element name.
+    {
+        var static_reader: xml.Reader.Static = .init(
+            std.testing.allocator,
+            "<elem" ++ cp ++ "/>",
+            .{},
+        );
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+        try expectEqual(.element_start, try reader.read());
+        try expectEqualStrings("elem" ++ cp, reader.elementName());
+        try expectEqual(.element_end, try reader.read());
+        try expectEqual(.eof, try reader.read());
+    }
+
+    // As a namespace prefix.
+    {
+        var static_reader: xml.Reader.Static = .init(
+            std.testing.allocator,
+            "<ns" ++ cp ++ ":elem xmlns:ns" ++ cp ++ "=\"https://example.com/ns\"/>",
+            .{},
+        );
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+        try expectEqual(.element_start, try reader.read());
+        try expectEqualStrings("ns" ++ cp, reader.elementNameNs().prefix);
+        try expectEqual(.element_end, try reader.read());
+        try expectEqual(.eof, try reader.read());
+    }
+}
+
+test "element name starting with invalid multi-byte character" {
+    // As an unprefixed element name.
+    {
+        var static_reader: xml.Reader.Static = .init(
+            std.testing.allocator,
+            "<\u{FFFE} />",
+            .{},
+        );
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+
+        try expectError(error.MalformedXml, reader.read());
+        try expectEqual(.name_malformed, reader.errorCode());
+    }
+
+    // As a namespace prefix.
+    {
+        var static_reader: xml.Reader.Static = .init(
+            std.testing.allocator,
+            "<\u{FFFE}:elem xmlns:\u{FFFE}=\"https://example.com/ns\"/>",
+            .{},
+        );
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+
+        try expectError(error.MalformedXml, reader.read());
+        try expectEqual(.name_malformed, reader.errorCode());
+    }
+}
+
+test "element name containing invalid multi-byte character" {
+    // As an unprefixed element name.
+    {
+        var static_reader: xml.Reader.Static = .init(
+            std.testing.allocator,
+            "<elem\u{FFFE} />",
+            .{},
+        );
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+
+        try expectError(error.MalformedXml, reader.read());
+        try expectEqual(.name_malformed, reader.errorCode());
+    }
+
+    // As a namespace prefix.
+    {
+        var static_reader: xml.Reader.Static = .init(
+            std.testing.allocator,
+            "<ns\u{FFFE}:elem xmlns:\u{FFFE}=\"https://example.com/ns\"/>",
+            .{},
+        );
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+
+        try expectError(error.MalformedXml, reader.read());
+        try expectEqual(.name_malformed, reader.errorCode());
+    }
+}
+
+test "namespaced element local part containing colon" {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<a:b:elem xmlns:a="https://example.com/ns"/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectError(error.MalformedXml, reader.read());
+    try expectEqual(.name_malformed, reader.errorCode());
+}
+
 fn parseQName(reader: Reader, name: []const u8) PrefixedQName {
     const prefix, const local = if (std.mem.indexOfScalar(u8, name, ':')) |colon_pos|
         .{ name[0..colon_pos], name[colon_pos + 1 ..] }
@@ -2540,9 +2679,8 @@ fn checkName(reader: *Reader, s: []const u8, pos: usize) !void {
 }
 
 fn checkNcName(reader: *Reader, s: []const u8, pos: usize) !void {
-    if (s.len == 0 or !isNameStartChar(s[0]) or std.mem.indexOfScalar(u8, s, ':') != null) {
-        return reader.fatal(.name_malformed, pos);
-    }
+    try reader.checkName(s, pos);
+    if (std.mem.indexOfScalar(u8, s, ':') != null) return reader.fatal(.name_malformed, pos);
 }
 
 fn isNameStartChar(c: u21) bool {
