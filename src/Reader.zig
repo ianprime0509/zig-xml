@@ -1565,6 +1565,120 @@ test namespaceUri {
     try expectEqualStrings("", reader.namespaceUri("child"));
 }
 
+test "namespace binding xml prefix to xml uri is valid" {
+    // The prefix `xml` MUST NOT be bound to any namespace name other than
+    // `http://www.w3.org/XML/1998/namespace`. Binding it to the correct,
+    // predefined URI is permitted (though redundant, since `xml` is always
+    // predefined).
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<root xmlns:xml="http://www.w3.org/XML/1998/namespace" xml:lang="en"/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.element_start, try reader.read());
+
+    // The `xmlns:xml` declaration itself.
+    try expectEqualStrings("xmlns", reader.attributeNameNs(0).prefix);
+    try expectEqualStrings("http://www.w3.org/2000/xmlns/", reader.attributeNameNs(0).ns);
+    try expectEqualStrings("xml", reader.attributeNameNs(0).local);
+
+    // The `xml:lang` attribute resolves via the predefined `xml` binding.
+    try expectEqualStrings("xml", reader.attributeNameNs(1).prefix);
+    try expectEqualStrings("http://www.w3.org/XML/1998/namespace", reader.attributeNameNs(1).ns);
+    try expectEqualStrings("lang", reader.attributeNameNs(1).local);
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqual(.eof, try reader.read());
+}
+
+test "namespace binding xml prefix to wrong uri is invalid" {
+    // The `xml` prefix bound to any URI other than its predefined URI is
+    // a namespace binding error.
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<root xmlns:xml="http://wrong"/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectError(error.MalformedXml, reader.read());
+    try expectEqual(.namespace_binding_illegal, reader.errorCode());
+}
+
+test "namespace binding xml prefix to xmlns uri is invalid" {
+    // The `xml` prefix must not be bound to the `xmlns` namespace name.
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<root xmlns:xml="http://www.w3.org/2000/xmlns/"/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectError(error.MalformedXml, reader.read());
+    try expectEqual(.namespace_binding_illegal, reader.errorCode());
+}
+
+test "namespace binding xml uri to non-xml prefix is invalid" {
+    // The `xml` namespace name MUST NOT be bound to any prefix other than
+    // `xml`.
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<root xmlns:foo="http://www.w3.org/XML/1998/namespace"/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectError(error.MalformedXml, reader.read());
+    try expectEqual(.namespace_binding_illegal, reader.errorCode());
+}
+
+test "namespace binding xml uri to default namespace is invalid" {
+    // The `xml` namespace name must not be bound as the default namespace.
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<root xmlns="http://www.w3.org/XML/1998/namespace"/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectError(error.MalformedXml, reader.read());
+    try expectEqual(.namespace_binding_illegal, reader.errorCode());
+}
+
+test "namespace binding xmlns uri to non-xmlns prefix is invalid" {
+    // The `xmlns` namespace name MUST NOT be bound to any prefix other than
+    // `xmlns` (and `xmlns` itself may only appear as `xmlns` or `xmlns:...`).
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<root xmlns:foo="http://www.w3.org/2000/xmlns/"/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectError(error.MalformedXml, reader.read());
+    try expectEqual(.namespace_binding_illegal, reader.errorCode());
+}
+
+test "namespace binding xmlns uri to default namespace is invalid" {
+    // The `xmlns` namespace name must not be bound as the default namespace.
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<root xmlns="http://www.w3.org/2000/xmlns/"/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectError(error.MalformedXml, reader.read());
+    try expectEqual(.namespace_binding_illegal, reader.errorCode());
+}
+
+test "namespace binding xmlns prefix is invalid" {
+    // The prefix `xmlns` may not be bound explicitly via `xmlns:xmlns="..."`.
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<root xmlns:xmlns="http://www.w3.org/2000/xmlns/"/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectError(error.MalformedXml, reader.read());
+    try expectEqual(.namespace_binding_illegal, reader.errorCode());
+}
+
 fn parseQName(reader: Reader, name: []const u8) PrefixedQName {
     const prefix, const local = if (std.mem.indexOfScalar(u8, name, ':')) |colon_pos|
         .{ name[0..colon_pos], name[colon_pos + 1 ..] }
@@ -2090,8 +2204,11 @@ fn checkAttributesNs(reader: *Reader) !void {
             if (value.len == 0) return reader.fatal(.attribute_prefix_undeclared, pos);
             const uri_index = try reader.addAttributeValueString(value);
             const uri = reader.string(uri_index);
-            if (std.mem.eql(u8, uri, "xml") != std.mem.eql(u8, uri, ns_xml)) return reader.fatal(.namespace_binding_illegal, pos);
-            if (std.mem.eql(u8, uri, ns_xmlns)) return reader.fatal(.namespace_binding_illegal, pos);
+            if (std.mem.eql(u8, prefix, "xml")) {
+                if (!std.mem.eql(u8, uri, ns_xml)) return reader.fatal(.namespace_binding_illegal, pos);
+            } else if (std.mem.eql(u8, uri, ns_xml) or std.mem.eql(u8, uri, ns_xmlns)) {
+                return reader.fatal(.namespace_binding_illegal, pos);
+            }
             try prefix_bindings.putNoClobber(reader.gpa, prefix_index, uri_index);
         }
     }
