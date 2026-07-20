@@ -119,15 +119,25 @@ pub const Options = struct {
 };
 
 pub const Node = enum {
+    /// End of file.
     eof,
+    /// The XML declaration.
     xml_declaration,
+    /// An element open tag, including attributes.
     element_start,
+    /// An element close tag.
     element_end,
+    /// A comment.
     comment,
+    /// A processing instruction.
     pi,
+    /// Plain text content.
     text,
+    /// CDATA content.
     cdata,
+    /// A character reference.
     character_reference,
+    /// A named entity reference.
     entity_reference,
 };
 
@@ -534,6 +544,46 @@ test "streaming with extremely long element name" {
     try expectEqualStrings(&name, reader.elementName());
 
     try expectEqual(.eof, try reader.read());
+}
+
+test "streaming with long text node" {
+    const long_text: [5000]u8 = @splat('a');
+    const xml_doc = "<root>" ++ long_text ++ "</root>";
+
+    var bytes: std.Io.Reader = .fixed(xml_doc);
+    var streaming_reader: xml.Reader.Streaming = .init(std.testing.allocator, &bytes, .{});
+    defer streaming_reader.deinit();
+    const reader = &streaming_reader.interface;
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.text, try reader.read());
+    try expectEqualStrings(&long_text, reader.textRaw());
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.eof, try reader.read());
+}
+
+test "streaming with malformed document ending in long text node" {
+    const long_text: [5000]u8 = @splat('a');
+    const xml_doc = "<root>" ++ long_text;
+
+    var bytes: std.Io.Reader = .fixed(xml_doc);
+    var streaming_reader: xml.Reader.Streaming = .init(std.testing.allocator, &bytes, .{});
+    defer streaming_reader.deinit();
+    const reader = &streaming_reader.interface;
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.text, try reader.read());
+    try expectEqualStrings(&long_text, reader.textRaw());
+
+    try expectError(error.MalformedXml, reader.read());
+    try expectEqual(.unexpected_eof, reader.errorCode());
 }
 
 pub fn init(gpa: Allocator, options: Options, vtable: *const VTable) Reader {
@@ -2467,38 +2517,11 @@ fn checkPi(reader: *Reader) !void {
 }
 
 fn readText(reader: *Reader) !void {
-    while (reader.pos < reader.buf.len) {
-        const b = reader.buf[reader.pos];
-        if (b == '&' or b == '<') return;
-        // We don't care about validating UTF-8 strictly here.
-        // We just don't want to end in the possible middle of a codepoint.
-        const nb: usize = if (b < 0x80) {
-            reader.pos += 1;
-            continue;
-        } else if (b < 0xE0)
-            2
-        else if (b < 0xF0)
-            3
-        else
-            4;
-        if (reader.pos + nb > reader.buf.len) try reader.more();
-        reader.pos = @min(reader.pos + nb, reader.buf.len);
-    }
-    // We don't want to end on a CR right before an LF, or CRLF normalization will not be possible.
-    if (reader.pos > 0 and reader.buf[reader.pos - 1] == '\r') {
+    while (true) {
+        reader.pos = std.mem.indexOfAnyPos(u8, reader.buf, reader.pos, "&<") orelse reader.buf.len;
+        if (reader.pos < reader.buf.len) return;
         try reader.more();
-        if (reader.pos < reader.buf.len and reader.buf[reader.pos] == '\n') {
-            reader.pos += 1;
-        }
-        return;
-    }
-    // We also don't want to end in the middle of ']]>' which checkText needs to reject.
-    if (reader.pos > 0 and reader.buf[reader.pos - 1] == ']') {
-        try reader.more();
-        if (std.mem.startsWith(u8, reader.buf[reader.pos..], "]>")) {
-            reader.pos += "]>".len;
-        }
-        return;
+        if (reader.pos == reader.buf.len) return;
     }
 }
 
