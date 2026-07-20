@@ -2861,6 +2861,7 @@ const QNameContext = struct {
         _ = ctx;
         var w = std.hash.Wyhash.init(0);
         w.update(qname.ns);
+        w.update(":");
         w.update(qname.local);
         return @truncate(w.final());
     }
