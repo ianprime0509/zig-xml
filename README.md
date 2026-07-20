@@ -15,7 +15,9 @@ The library aims to confirm with the following standards:
 Currently, DTDs (DOCTYPE) are not supported.
 
 Other standards (such as XML 1.1 or XML 1.0 prior to the fifth edition) are only
-supported insofar as they are compatible with the above standards.
+supported insofar as they are compatible with the above standards. Additionally,
+only UTF-8 and UTF-16 encodings (as required by the standard) are supported
+(UTF-16 is only supported by the streaming reader).
 
 ## Examples
 
