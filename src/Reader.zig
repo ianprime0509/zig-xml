@@ -2281,11 +2281,37 @@ fn checkXmlVersion(reader: *Reader, version: []const u8, n_attr: usize) !void {
     if (!std.mem.startsWith(u8, version, "1.")) {
         return reader.fatal(.xml_declaration_version_unsupported, reader.attributeValuePos(n_attr));
     }
-    for (version["1.".len..]) |c| {
-        switch (c) {
-            '0'...'9' => {},
-            else => return reader.fatal(.xml_declaration_version_unsupported, reader.attributeValuePos(n_attr)),
-        }
+    const minor = version["1.".len..];
+    const minor_valid = minor.len > 0 and for (minor) |c| switch (c) {
+        '0'...'9' => {},
+        else => break false,
+    } else true;
+    if (!minor_valid) return reader.fatal(.xml_declaration_version_unsupported, reader.attributeValuePos(n_attr));
+}
+
+test checkXmlVersion {
+    // Valid versions: must start with "1." followed by one or more digits.
+    const valid_cases = [_][]const u8{ "1.0", "1.1", "1.42", "1.999" };
+    for (valid_cases) |version| {
+        const xml_doc = try std.fmt.allocPrint(std.testing.allocator, "<?xml version='{s}'?><root/>", .{version});
+        defer std.testing.allocator.free(xml_doc);
+        var static_reader: xml.Reader.Static = .init(std.testing.allocator, xml_doc, .{});
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+        try expectEqual(.xml_declaration, reader.read());
+        try expectEqualStrings(version, reader.xmlDeclarationVersion());
+    }
+
+    // Invalid versions: "1." has no digits, "2.0" has wrong major, etc.
+    const invalid_cases = [_][]const u8{ "1.", "2.0", "1.0a", "10", "", "abc" };
+    for (invalid_cases) |version| {
+        const xml_doc = try std.fmt.allocPrint(std.testing.allocator, "<?xml version='{s}'?><root/>", .{version});
+        defer std.testing.allocator.free(xml_doc);
+        var static_reader: xml.Reader.Static = .init(std.testing.allocator, xml_doc, .{});
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+        try expectError(error.MalformedXml, reader.read());
+        try expectEqual(.xml_declaration_version_unsupported, reader.errorCode());
     }
 }
 
