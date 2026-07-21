@@ -2817,6 +2817,27 @@ fn skipBom(reader: *Reader) !void {
     }
 }
 
+test "UTF-8 BOM at start of document" {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator, "\u{FEFF}" ++
+        \\<?xml version="1.0"?>
+        \\<root/>
+        \\
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.xml_declaration, try reader.read());
+    try expectEqualStrings("1.0", reader.xmlDeclarationVersion());
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.eof, try reader.read());
+}
+
 fn skipSpace(reader: *Reader) !void {
     while (true) {
         while (reader.pos < reader.buf.len) {
