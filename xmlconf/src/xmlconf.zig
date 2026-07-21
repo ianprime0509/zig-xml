@@ -206,7 +206,7 @@ fn runTest(gpa: Allocator, io: Io, dir: Io.Dir, reader: *xml.Reader, results: *R
     switch (@"type") {
         .valid, .invalid => try runTestParseable(gpa, id, input, output, options, results),
         .@"not-wf" => try runTestUnparseable(gpa, id, input, options, results),
-        .@"error" => results.skip(id, "not sure how to run error tests", .{}),
+        .@"error" => results.skip(id, "type 'error' indicates an optional error; there is no consistent standard by which we can evaluate these tests", .{}),
     }
 }
 
