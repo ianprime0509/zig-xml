@@ -36,7 +36,7 @@ pub fn fuzz(gpa: Allocator, input: []const u8) !void {
                 try writer.xmlDeclaration(reader.xmlDeclarationEncoding(), reader.xmlDeclarationStandalone());
             },
             .comment => {
-                // TODO: not implemented yet
+                try writer.comment(try reader.comment());
             },
             .element_start => {
                 try writer.elementStart(reader.elementName());
