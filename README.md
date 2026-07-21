@@ -32,8 +32,7 @@ The `xmlconf` directory additionally contains a runner for the [W3C XML
 Conformance Test Suite](https://www.w3.org/XML/Test/). Running `zig build test`
 in that directory will fetch the test suite distribution tarball and run the
 tests within. Due to features missing in the current parser implementation (DTD
-support), many tests are currently skipped. At the time of writing, 250 tests
-pass, and 924 are skipped due to unsupported features.
+support), many tests are currently skipped.
 
 ## Fuzzing
 

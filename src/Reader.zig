@@ -142,40 +142,73 @@ pub const Node = enum {
 };
 
 pub const ErrorCode = enum {
+    /// XML declaration has unsupported attribute (not `version`, `encoding`, `standalone`).
     xml_declaration_attribute_unsupported,
+    /// XML declaration is missing the required `version` attribute.
     xml_declaration_version_missing,
+    /// XML declaration has an unsupported `version` value (must be `1.x`).
     xml_declaration_version_unsupported,
+    /// XML declaration `encoding` value is not supported by the reader implementation.
     xml_declaration_encoding_unsupported,
+    /// XML declaration `standalone` value is not `yes` or `no`.
     xml_declaration_standalone_malformed,
+    /// A DOCTYPE declaration was encountered, which is currently not supported.
     doctype_unsupported,
-    directive_unknown,
+    /// Missing whitespace between attributes.
     attribute_missing_space,
+    /// Duplicate attribute name on the same element.
     attribute_duplicate,
+    /// Attempted to undeclare a namespace prefix with an empty URI value.
     attribute_prefix_undeclared,
+    /// The `<` character is not allowed in attribute values (must be escaped as `&lt;`).
     attribute_illegal_character,
+    /// Element end tag name does not match the corresponding start tag.
     element_end_mismatched,
+    /// Element end tag is missing the closing `>`.
     element_end_unclosed,
+    /// Comment contains `--` (not allowed inside comments).
     comment_malformed,
+    /// Comment was never closed (missing `-->`).
     comment_unclosed,
+    /// Processing instruction was never closed (missing `?>`).
     pi_unclosed,
+    /// Processing instruction target `xml` is reserved.
     pi_target_disallowed,
+    /// Missing whitespace between processing instruction target and its data.
     pi_missing_space,
+    /// The sequence `]]>` is not allowed in text nodes (unescaped).
     text_cdata_end_disallowed,
+    /// CDATA section was never closed (missing `]]>`).
     cdata_unclosed,
+    /// Entity reference is missing the closing `;`.
     entity_reference_unclosed,
+    /// Entity reference name is not one of the five predefined XML entities (`amp`, `lt`, `gt`, `apos`, `quot`).
     entity_reference_undefined,
+    /// Character reference is missing the closing `;`.
     character_reference_unclosed,
+    /// Character reference is malformed (invalid hex/decimal value, or references an illegal character).
     character_reference_malformed,
+    /// Name does not conform to XML name rules.
     name_malformed,
+    /// Namespace prefix is not bound to any URI.
     namespace_prefix_unbound,
+    /// Illegal namespace binding (e.g., binding `xml` to the wrong URI, binding `xmlns` URI to the wrong prefix, or redeclaring `xmlns`).
     namespace_binding_illegal,
+    /// The `xmlns` prefix is reserved and cannot be used on elements.
     namespace_prefix_illegal,
+    /// An unexpected character was encountered where none was expected.
     unexpected_character,
+    /// Unexpected end of file before the document was complete.
     unexpected_eof,
+    /// Expected an `=` sign between an attribute name and its value.
     expected_equals,
+    /// Expected an opening quote (`"` or `'`) for an attribute value.
     expected_quote,
+    /// Attribute value is missing the closing quote.
     missing_end_quote,
+    /// The document contains invalid UTF-8.
     invalid_encoding,
+    /// A character not allowed by the XML specification was encountered.
     illegal_character,
 };
 
@@ -1884,6 +1917,8 @@ pub const ReadError = error{ MalformedXml, ReadFailed, OutOfMemory };
 pub const ReadWriteError = ReadError || error{WriteFailed};
 
 /// Reads and returns the next node in the document.
+///
+/// Errors returned from this function are not recoverable.
 pub fn read(reader: *Reader) ReadError!Node {
     errdefer reader.node = null;
     const node: Node = node: switch (reader.state) {
