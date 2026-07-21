@@ -34,6 +34,7 @@ pub fn build(b: *Build) void {
     const examples: []const []const u8 = &.{
         "reader",
         "canonicalize",
+        "format",
         "tree",
     };
     const install_examples_step = b.step("install-examples", "Build and install the example programs");
