@@ -99,20 +99,26 @@ pub const Location = struct {
     }
 };
 
+/// A qualified name (XML namespace URI and local part).
 pub const QName = struct {
     ns: []const u8,
     local: []const u8,
 
+    /// Returns whether `qname` matches the given namespace URI and local part.
     pub fn is(qname: QName, ns: []const u8, local: []const u8) bool {
         return std.mem.eql(u8, qname.ns, ns) and std.mem.eql(u8, qname.local, local);
     }
 };
 
+/// A qualified name (XML namespace URI and local part) with the original prefix also available.
 pub const PrefixedQName = struct {
     prefix: []const u8,
     ns: []const u8,
     local: []const u8,
 
+    /// Returns whether `qname` matches the given namespace URI and local part.
+    /// The prefix of `qname` is ignored, since it does not contribute to the
+    /// identity of the name in a namespace-aware context.
     pub fn is(qname: PrefixedQName, ns: []const u8, local: []const u8) bool {
         return std.mem.eql(u8, qname.ns, ns) and std.mem.eql(u8, qname.local, local);
     }
