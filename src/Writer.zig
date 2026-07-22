@@ -3,6 +3,10 @@
 //! [Namespaces in XML 1.0 (Third
 //! Edition)](https://www.w3.org/TR/2009/REC-xml-names-20091208/)
 //! specifications.
+//!
+//! Writer functions are named after the thing they write, e.g. `text`. The
+//! writer internally keeps track of the current state of the document,
+//! including tracking defined namespace prefixes.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -695,6 +699,8 @@ pub const TextWriter = struct {
     }
 };
 
+/// Returns an adapter which can be used as a `std.Io.Writer` to write properly
+/// escaped text content.
 pub fn textWriter(writer: *Writer, buffer: []u8) WriteError!TextWriter {
     try writer.textStart();
     return .{
