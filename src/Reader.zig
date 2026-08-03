@@ -56,6 +56,7 @@ state: State,
 /// The layout of the spans depends on the node type:
 /// - `eof` - none
 /// - `xml_declaration` - "xml" (NAME VALUE)...
+/// - `doctype_declaration` - NAME [KIND QUOTED [QUOTED]]
 /// - `element_start` - NAME (NAME VALUE)...
 /// - `element_end` - NAME
 /// - `comment` - COMMENT
@@ -123,6 +124,8 @@ pub const Node = enum {
     eof,
     /// The XML declaration.
     xml_declaration,
+    /// Doctype declaration.
+    doctype_declaration,
     /// An element open tag, including attributes.
     element_start,
     /// An element close tag.
@@ -152,8 +155,10 @@ pub const ErrorCode = enum {
     xml_declaration_encoding_unsupported,
     /// XML declaration `standalone` value is not `yes` or `no`.
     xml_declaration_standalone_malformed,
-    /// A DOCTYPE declaration was encountered, which is currently not supported.
-    doctype_unsupported,
+    /// Doctype kind was invalid. Should be one of SYSTEM, PUBLIC, or none proveded.
+    doctype_kind_invalid,
+    /// Doctype was malformed or missing closing angle bracket
+    doctype_unclosed,
     /// Missing whitespace between attributes.
     attribute_missing_space,
     /// Duplicate attribute name on the same element.
@@ -1913,7 +1918,7 @@ fn parseQName(reader: Reader, name: []const u8) PrefixedQName {
     };
 }
 
-pub const ReadError = error{ MalformedXml, ReadFailed, OutOfMemory };
+pub const ReadError = error{ MalformedXml, InvalidDoctype, ReadFailed, OutOfMemory };
 pub const ReadWriteError = ReadError || error{WriteFailed};
 
 /// Reads and returns the next node in the document.
@@ -1955,7 +1960,9 @@ pub fn read(reader: *Reader) ReadError!Node {
                 try reader.checkComment();
                 break :node .comment;
             } else if (try reader.readMatch("<!DOCTYPE")) {
-                return reader.fatal(.doctype_unsupported, reader.pos);
+                try reader.readDoctypeContent();
+                reader.state = .after_doctype;
+                break :node .doctype_declaration;
             }
             reader.state = .after_doctype;
             continue :node reader.state;
@@ -2127,7 +2134,7 @@ pub fn readElementTextWrite(reader: *Reader, writer: *std.Io.Writer) ReadWriteEr
     const depth = reader.element_names.items.len;
     while (true) {
         switch (try reader.read()) {
-            .xml_declaration, .eof => unreachable,
+            .xml_declaration, .doctype_declaration, .eof => unreachable,
             .element_start, .comment, .pi => {},
             .element_end => if (reader.element_names.items.len == depth) return,
             .text => try reader.textWrite(writer),
@@ -2991,4 +2998,114 @@ fn addString(reader: *Reader, s: []const u8) !StringIndex {
 
 fn string(reader: *const Reader, index: StringIndex) []const u8 {
     return std.mem.sliceTo(reader.strings.items[@intFromEnum(index)..], 0);
+}
+
+test "Handle DOCTYPE" {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator, "\u{FEFF}" ++
+        \\<?xml version="1.0"?>
+        \\<!DOCTYPE root>
+        \\<root/>
+        \\
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.xml_declaration, try reader.read());
+    try expectEqualStrings("1.0", reader.xmlDeclarationVersion());
+    try expectEqual(.doctype_declaration, try reader.read());
+    try expectEqual(2, reader.spans.items.len);
+    try expectEqualStrings("root", reader.doctypeSpan(0));
+    try expectEqualStrings("", reader.doctypeSpan(1));
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.eof, try reader.read());
+}
+test "Handle public DOCTYPE" {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator, "\u{FEFF}" ++
+        \\<?xml version="1.0"?>
+        \\<!DOCTYPE root PUBLIC "/quotedFPI/" "/quotedURI">
+        \\<root/>
+        \\
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.xml_declaration, try reader.read());
+    try expectEqualStrings("1.0", reader.xmlDeclarationVersion());
+    try expectEqual(.doctype_declaration, try reader.read());
+    try expectEqual(4, reader.spans.items.len);
+    try expectEqualStrings("root", reader.doctypeSpan(0));
+    try expectEqualStrings("PUBLIC", reader.doctypeSpan(1));
+    try expectEqualStrings("/quotedFPI/", reader.doctypeSpan(2));
+    try expectEqualStrings("/quotedURI", reader.doctypeSpan(3));
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.eof, try reader.read());
+}
+test "Handle system DOCTYPE" {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator, "\u{FEFF}" ++
+        \\<?xml version="1.0"?>
+        \\<!DOCTYPE root SYSTEM "/quotedURI">
+        \\<root/>
+        \\
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.xml_declaration, try reader.read());
+    try expectEqualStrings("1.0", reader.xmlDeclarationVersion());
+    try expectEqual(.doctype_declaration, try reader.read());
+    try expectEqual(3, reader.spans.items.len);
+    try expectEqualStrings("root", reader.doctypeSpan(0));
+    try expectEqualStrings("SYSTEM", reader.doctypeSpan(1));
+    try expectEqualStrings("/quotedURI", reader.doctypeSpan(2));
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.element_end, try reader.read());
+    try expectEqualStrings("root", reader.elementName());
+
+    try expectEqual(.eof, try reader.read());
+}
+const DoctypeKind = enum { PUBLIC, SYSTEM };
+
+fn readDoctypeContent(reader: *Reader) ReadError!void {
+    try reader.readSpace();
+    try reader.readName(); // name of root node
+    try reader.readSpace();
+    // KIND of Doctype (none, public, system)
+    try reader.readName();
+
+    const kind_span = reader.spans.getLast();
+    // Empty KIND
+    if (kind_span.start == kind_span.end) {
+        if (!try reader.readMatch(">")) return reader.fatal(.doctype_unclosed, reader.pos);
+        return;
+    }
+    const kind = std.meta.stringToEnum(DoctypeKind, reader.bufSlice(kind_span)) orelse return error.InvalidDoctype;
+
+    try reader.readSpace();
+    try reader.readQuotedValue();
+
+    if (kind == .PUBLIC) {
+        try reader.readSpace();
+        try reader.readQuotedValue();
+    }
+    if (!try reader.readMatch(">")) return reader.fatal(.doctype_unclosed, reader.pos);
+}
+fn doctypeSpan(reader: Reader, offset: usize) []const u8 {
+    assert(reader.node == .doctype_declaration);
+    const root_name_span = reader.spans.items[offset];
+    return reader.bufSlice(root_name_span);
 }
