@@ -2518,7 +2518,7 @@ fn checkElementEnd(reader: *Reader) !void {
     const element_name = if (@hasDecl(@TypeOf(reader.element_names), "last")) // zig 0.17
         reader.string((reader.element_names.last() orelse {
             return reader.fatal(.element_end_mismatched, reader.elementNamePos());
-        }).*)
+        }))
     else
         reader.string(reader.element_names.getLast());
     if (!std.mem.eql(u8, reader.elementNameUnchecked(), element_name)) {
