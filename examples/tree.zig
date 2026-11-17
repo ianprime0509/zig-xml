@@ -16,7 +16,7 @@ const Document = struct {
             const node = try reader.read();
             switch (node) {
                 .eof => break,
-                .xml_declaration => continue,
+                .xml_declaration, .doctype => continue,
                 .element_start => try root_nodes.append(arena, .{ .element = try parseElement(arena, reader) }),
                 .element_end => unreachable,
                 .comment => continue,
@@ -43,7 +43,7 @@ const Document = struct {
         while (true) {
             const node = try reader.read();
             switch (node) {
-                .eof, .xml_declaration => unreachable,
+                .eof, .xml_declaration, .doctype => unreachable,
                 .element_start => {
                     if (text.written().len > 0) {
                         try children.append(arena, .{ .text = try text.toOwnedSlice() });

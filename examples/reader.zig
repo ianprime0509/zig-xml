@@ -42,6 +42,14 @@ pub fn main(init: std.process.Init) !void {
                     reader.xmlDeclarationStandalone(),
                 });
             },
+            .doctype => {
+                try stdout.print("doctype: name={s} public_id={?s} system_id={?s} internal_subset=\"{f}\"\n", .{
+                    reader.doctypeName(),
+                    reader.doctypePublicId(),
+                    reader.doctypeSystemId(),
+                    std.zig.fmtString(reader.doctypeInternalSubsetRaw()),
+                });
+            },
             .element_start => {
                 const element_name = reader.elementNameNs();
                 try stdout.print("element_start: \"{f}\"[\"{f}\"]:\"{f}\"\n", .{

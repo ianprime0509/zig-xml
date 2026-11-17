@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
         };
         switch (node) {
             .eof => break,
-            .xml_declaration, .comment => {}, // ignored in canonical form
+            .xml_declaration, .doctype, .comment => {}, // ignored in canonical form
             .element_start => {
                 try writer.elementStart(reader.elementName());
 

@@ -56,6 +56,7 @@ state: State,
 /// The layout of the spans depends on the node type:
 /// - `eof` - none
 /// - `xml_declaration` - "xml" (NAME VALUE)...
+/// - `doctype` - NAME [[PUBLIC_ID] SYSTEM_ID] INTERNAL_SUBSET
 /// - `element_start` - NAME (NAME VALUE)...
 /// - `element_end` - NAME
 /// - `comment` - COMMENT
@@ -123,6 +124,8 @@ pub const Node = enum {
     eof,
     /// The XML declaration.
     xml_declaration,
+    /// The document type declaration (DOCTYPE).
+    doctype,
     /// An element open tag, including attributes.
     element_start,
     /// An element close tag.
@@ -152,8 +155,10 @@ pub const ErrorCode = enum {
     xml_declaration_encoding_unsupported,
     /// XML declaration `standalone` value is not `yes` or `no`.
     xml_declaration_standalone_malformed,
-    /// A DOCTYPE declaration was encountered, which is currently not supported.
-    doctype_unsupported,
+    /// DOCTYPE does not match the grammar of a document type declaration.
+    doctype_malformed,
+    /// DOCTYPE or its internal subset was never closed (missing `]` or `>`).
+    doctype_unclosed,
     /// Missing whitespace between attributes.
     attribute_missing_space,
     /// Duplicate attribute name on the same element.
@@ -805,6 +810,115 @@ test xmlDeclarationStandalone {
 
     try expectEqual(.xml_declaration, try reader.read());
     try expectEqual(true, reader.xmlDeclarationStandalone());
+}
+
+/// Returns the root element name declared by the DOCTYPE.
+/// Asserts that the current node is `Node.doctype`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
+pub fn doctypeName(reader: Reader) []const u8 {
+    assert(reader.node == .doctype);
+    return reader.doctypeNameUnchecked();
+}
+
+test doctypeName {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<!DOCTYPE root>
+        \\<root/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.doctype, try reader.read());
+    try expectEqualStrings("root", reader.doctypeName());
+}
+
+fn doctypeNameUnchecked(reader: Reader) []const u8 {
+    return reader.bufSlice(reader.spans.items[0]);
+}
+
+fn doctypeNamePos(reader: Reader) usize {
+    return reader.spans.items[0].start;
+}
+
+/// Returns the public identifier of the DOCTYPE, or null if it has none.
+/// Asserts that the current node is `Node.doctype`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
+pub fn doctypePublicId(reader: Reader) ?[]const u8 {
+    assert(reader.node == .doctype);
+    return reader.doctypePublicIdUnchecked();
+}
+
+test doctypePublicId {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+        \\<svg/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.doctype, try reader.read());
+    try expectEqualStrings("-//W3C//DTD SVG 1.1//EN", reader.doctypePublicId().?);
+}
+
+fn doctypePublicIdUnchecked(reader: Reader) ?[]const u8 {
+    if (reader.spans.items.len < 4) return null;
+    return reader.bufSlice(reader.spans.items[1]);
+}
+
+fn doctypePublicIdPos(reader: Reader) usize {
+    return reader.spans.items[1].start;
+}
+
+/// Returns the system identifier of the DOCTYPE, or null if it has none.
+/// Asserts that the current node is `Node.doctype`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
+pub fn doctypeSystemId(reader: Reader) ?[]const u8 {
+    assert(reader.node == .doctype);
+    if (reader.spans.items.len < 3) return null;
+    return reader.bufSlice(reader.spans.items[reader.spans.items.len - 2]);
+}
+
+test doctypeSystemId {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<!DOCTYPE root SYSTEM "root.dtd">
+        \\<root/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.doctype, try reader.read());
+    try expectEqual(null, reader.doctypePublicId());
+    try expectEqualStrings("root.dtd", reader.doctypeSystemId().?);
+}
+
+/// Returns the internal subset of the DOCTYPE (the content between `[` and
+/// `]`) as it appears in the document, or an empty string if there is none.
+/// The reader checks that the internal subset is well-formed at the level of
+/// markup declarations, comments, PIs and parameter entity references, but
+/// does not process the declarations: entities declared here cannot be
+/// referenced from content, and attribute defaults are not applied.
+/// Asserts that the current node is `Node.doctype`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
+pub fn doctypeInternalSubsetRaw(reader: Reader) []const u8 {
+    assert(reader.node == .doctype);
+    return reader.doctypeInternalSubsetUnchecked();
+}
+
+test doctypeInternalSubsetRaw {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<!DOCTYPE root [<!ENTITY e "a>b">]>
+        \\<root/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.doctype, try reader.read());
+    try expectEqual(null, reader.doctypeSystemId());
+    try expectEqualStrings("<!ENTITY e \"a>b\">", reader.doctypeInternalSubsetRaw());
+}
+
+fn doctypeInternalSubsetUnchecked(reader: Reader) []const u8 {
+    return reader.bufSlice(reader.spans.getLast());
 }
 
 /// Returns the name of the element.
@@ -1955,7 +2069,10 @@ pub fn read(reader: *Reader) ReadError!Node {
                 try reader.checkComment();
                 break :node .comment;
             } else if (try reader.readMatch("<!DOCTYPE")) {
-                return reader.fatal(.doctype_unsupported, reader.pos);
+                try reader.readDoctypeContent();
+                reader.state = .after_doctype;
+                try reader.checkDoctype();
+                break :node .doctype;
             }
             reader.state = .after_doctype;
             continue :node reader.state;
@@ -2127,7 +2244,7 @@ pub fn readElementTextWrite(reader: *Reader, writer: *std.Io.Writer) ReadWriteEr
     const depth = reader.element_names.items.len;
     while (true) {
         switch (try reader.read()) {
-            .xml_declaration, .eof => unreachable,
+            .xml_declaration, .doctype, .eof => unreachable,
             .element_start, .comment, .pi => {},
             .element_end => if (reader.element_names.items.len == depth) return,
             .text => try reader.textWrite(writer),
@@ -2563,18 +2680,131 @@ fn readPiContent(reader: *Reader) !void {
 }
 
 fn checkPi(reader: *Reader) !void {
-    const target = reader.piTargetUnchecked();
+    try reader.checkPiSpans(reader.spans.items[0], reader.spans.items[1]);
+}
+
+fn checkPiSpans(reader: *Reader, target_span: BufSpan, data_span: BufSpan) !void {
+    const target = reader.bufSlice(target_span);
     if (std.ascii.eqlIgnoreCase(target, "xml")) {
-        return reader.fatal(.pi_target_disallowed, reader.piTargetPos());
+        return reader.fatal(.pi_target_disallowed, target_span.start);
     }
-    try reader.checkName(target, reader.piTargetPos());
+    try reader.checkName(target, target_span.start);
     if (reader.options.namespace_aware and std.mem.indexOfScalar(u8, target, ':') != null) {
-        return reader.fatal(.name_malformed, reader.piTargetPos());
+        return reader.fatal(.name_malformed, target_span.start);
     }
-    if (reader.piTargetEndPos() == reader.piDataPos() and reader.piDataEndPos() > reader.piDataPos()) {
-        return reader.fatal(.pi_missing_space, reader.piDataPos());
+    if (target_span.end == data_span.start and data_span.end > data_span.start) {
+        return reader.fatal(.pi_missing_space, data_span.start);
     }
-    try reader.checkChars(reader.piDataUnchecked(), reader.piDataPos());
+    try reader.checkChars(reader.bufSlice(data_span), data_span.start);
+}
+
+fn readDoctypeContent(reader: *Reader) !void {
+    try reader.readDoctypeSpace();
+    try reader.readName();
+    const space_start = reader.pos;
+    try reader.readSpace();
+    if (reader.pos > space_start) {
+        if (try reader.readMatch("SYSTEM")) {
+            try reader.readDoctypeSpace();
+            try reader.readQuotedValue();
+            try reader.readSpace();
+        } else if (try reader.readMatch("PUBLIC")) {
+            try reader.readDoctypeSpace();
+            try reader.readQuotedValue();
+            try reader.readDoctypeSpace();
+            try reader.readQuotedValue();
+            try reader.readSpace();
+        }
+    }
+    if (try reader.readMatch("[")) {
+        try reader.readDoctypeInternalSubset();
+        try reader.readSpace();
+    } else {
+        try reader.spans.append(reader.gpa, .{ .start = reader.pos, .end = reader.pos });
+    }
+    if (!try reader.readMatch(">")) return reader.fatalDoctype();
+}
+
+/// Reads up to and including the `]` closing the internal subset, checking
+/// its structure but not the content of the markup declarations.
+fn readDoctypeInternalSubset(reader: *Reader) !void {
+    const start = reader.pos;
+    while (true) {
+        try reader.readSpace();
+        if (try reader.readMatch("]")) {
+            try reader.spans.append(reader.gpa, .{ .start = start, .end = reader.pos - "]".len });
+            return;
+        } else if (try reader.readMatch("%")) {
+            try reader.readName();
+            const name_span = reader.spans.pop().?;
+            try reader.checkName(reader.bufSlice(name_span), name_span.start);
+            if (!try reader.readMatch(";")) return reader.fatal(.entity_reference_unclosed, reader.pos);
+        } else if (try reader.readMatch("<?")) {
+            try reader.readName();
+            try reader.readPiContent();
+            const data_span = reader.spans.pop().?;
+            const target_span = reader.spans.pop().?;
+            try reader.checkPiSpans(target_span, data_span);
+        } else if (try reader.readMatch("<!--")) {
+            try reader.readCommentContent();
+            _ = reader.spans.pop().?;
+        } else if (try reader.readMatch("<!ELEMENT") or
+            try reader.readMatch("<!ATTLIST") or
+            try reader.readMatch("<!ENTITY") or
+            try reader.readMatch("<!NOTATION"))
+        {
+            try reader.readDoctypeSpace();
+            try reader.readMarkupDeclarationRest();
+        } else {
+            return reader.fatalDoctype();
+        }
+    }
+}
+
+/// Skips to after the `>` ending a markup declaration, skipping over quoted
+/// literals, which may contain `>`.
+fn readMarkupDeclarationRest(reader: *Reader) !void {
+    while (true) {
+        if (reader.pos == reader.buf.len) {
+            try reader.more();
+            if (reader.pos == reader.buf.len) return reader.fatal(.doctype_unclosed, reader.pos);
+        }
+        switch (reader.buf[reader.pos]) {
+            '>' => {
+                reader.pos += 1;
+                return;
+            },
+            '"', '\'' => {
+                try reader.readQuotedValue();
+                _ = reader.spans.pop().?;
+            },
+            else => reader.pos += 1,
+        }
+    }
+}
+
+fn readDoctypeSpace(reader: *Reader) !void {
+    const start = reader.pos;
+    try reader.readSpace();
+    if (reader.pos == start) return reader.fatalDoctype();
+}
+
+fn fatalDoctype(reader: *Reader) error{MalformedXml} {
+    return reader.fatal(if (reader.pos == reader.buf.len) .doctype_unclosed else .doctype_malformed, reader.pos);
+}
+
+fn checkDoctype(reader: *Reader) !void {
+    try reader.checkName(reader.doctypeNameUnchecked(), reader.doctypeNamePos());
+    if (reader.doctypePublicIdUnchecked()) |public_id| {
+        for (public_id, 0..) |c, i| switch (c) {
+            ' ', '\r', '\n', 'a'...'z', 'A'...'Z', '0'...'9' => {},
+            '-', '\'', '(', ')', '+', ',', '.', '/', ':', '=', '?', ';', '!', '*', '#', '@', '$', '_', '%' => {},
+            else => return reader.fatal(.illegal_character, reader.doctypePublicIdPos() + i),
+        };
+    }
+    for (reader.spans.items[1..]) |span| {
+        try reader.checkChars(reader.bufSlice(span), span.start);
+    }
 }
 
 fn readText(reader: *Reader) !void {
