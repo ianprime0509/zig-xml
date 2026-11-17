@@ -1962,6 +1962,19 @@ test "namespace binding xmlns uri to non-xmlns prefix is invalid" {
     try expectEqual(.namespace_binding_illegal, reader.errorCode());
 }
 
+test "namespace URI with character references" {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<root xmlns="https://example.com/&#x61;&#98;" xmlns:p="&#x2F;&amp;&#x2F;"><p:a/></root>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("https://example.com/ab", reader.elementNameNs().ns);
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("/&/", reader.elementNameNs().ns);
+}
+
 test "namespace binding xmlns uri to default namespace is invalid" {
     // The `xmlns` namespace name must not be bound as the default namespace.
     var static_reader: xml.Reader.Static = .init(std.testing.allocator,
@@ -2792,7 +2805,7 @@ fn addAttributeValueString(reader: *Reader, raw_value: []const u8) !StringIndex 
                     else
                         std.fmt.parseInt(u21, raw_value[i + "&#".len .. entity_end], 10) catch unreachable;
                     try reader.strings.ensureUnusedCapacity(reader.gpa, 4);
-                    reader.strings.items.len += std.unicode.utf8Encode(c, reader.strings.items) catch unreachable;
+                    reader.strings.items.len += std.unicode.utf8Encode(c, reader.strings.unusedCapacitySlice()) catch unreachable;
                 } else {
                     const expansion = predefined_entities.get(raw_value[i + "&".len .. entity_end]) orelse unreachable;
                     try reader.strings.appendSlice(reader.gpa, expansion);
