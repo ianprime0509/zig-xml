@@ -55,6 +55,7 @@ pub fn main(init: std.process.Init) !void {
             .element_end => {
                 try writer.elementEnd();
             },
+            .doctype => {}, // not supported by Writer
             .comment => {
                 try writer.comment(try reader.comment());
             },

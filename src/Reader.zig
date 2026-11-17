@@ -56,6 +56,7 @@ state: State,
 /// The layout of the spans depends on the node type:
 /// - `eof` - none
 /// - `xml_declaration` - "xml" (NAME VALUE)...
+/// - `doctype` - NAME [[PUBLIC_ID] SYSTEM_ID] INTERNAL_SUBSET
 /// - `element_start` - NAME (NAME VALUE)...
 /// - `element_end` - NAME
 /// - `comment` - COMMENT
@@ -123,6 +124,8 @@ pub const Node = enum {
     eof,
     /// The XML declaration.
     xml_declaration,
+    /// The document type declaration (DOCTYPE).
+    doctype,
     /// An element open tag, including attributes.
     element_start,
     /// An element close tag.
@@ -152,8 +155,10 @@ pub const ErrorCode = enum {
     xml_declaration_encoding_unsupported,
     /// XML declaration `standalone` value is not `yes` or `no`.
     xml_declaration_standalone_malformed,
-    /// A DOCTYPE declaration was encountered, which is currently not supported.
-    doctype_unsupported,
+    /// DOCTYPE does not match the grammar of a document type declaration.
+    doctype_malformed,
+    /// DOCTYPE or its internal subset was never closed (missing `]` or `>`).
+    doctype_unclosed,
     /// Missing whitespace between attributes.
     attribute_missing_space,
     /// Duplicate attribute name on the same element.
@@ -222,7 +227,10 @@ pub const VTable = struct {
     /// The new start of the window must not exceed the document's length.
     move: *const fn (reader: *Reader, advance: usize, len: usize) MoveError!void,
     /// Returns whether `encoding` is a supported value for the encoding in the
-    /// XML declaration.
+    /// XML declaration. If it is, the document content after the current
+    /// position, the end of the XML declaration, must be decoded using it. To
+    /// that end, the implementation may shorten the window to end at the
+    /// current position.
     ///
     /// At least one call to `moveFn` must be made before calling this function.
     checkEncoding: *const fn (reader: *Reader, encoding: []const u8) bool,
@@ -309,7 +317,8 @@ test Static {
     try expectEqual(.eof, try reader.read());
 }
 
-/// Reads a UTF-8 or UTF-16 encoded XML document from a `std.Io.Reader`.
+/// Reads a UTF-8 or UTF-16 encoded XML document from a `std.Io.Reader`, or an
+/// ISO-8859-1 or US-ASCII encoded one if declared in its XML declaration.
 pub const Streaming = struct {
     in: *std.Io.Reader,
     state: enum {
@@ -317,8 +326,13 @@ pub const Streaming = struct {
         utf8,
         utf16be,
         utf16le,
+        iso_8859_1,
+        us_ascii,
     },
     err: ?StreamError = null,
+    /// The start of the bytes in `buf` which were read before the XML
+    /// declaration switched to a single-byte encoding and are not yet decoded.
+    undecoded_start: ?usize = null,
 
     transcode_buf: [3]u8,
     transcode_buf_len: u2,
@@ -369,6 +383,13 @@ pub const Streaming = struct {
     fn move(reader: *Reader, advance: usize, len: usize) MoveError!void {
         const self: *Streaming = @alignCast(@fieldParentPtr("interface", reader));
         self.pos += advance;
+        if (self.undecoded_start) |undecoded_start| {
+            self.decodeBuffered(undecoded_start) catch |err| {
+                self.err = err;
+                return error.ReadFailed;
+            };
+            self.undecoded_start = null;
+        }
         if (len <= self.avail - self.pos) {
             reader.buf = self.buf[self.pos..][0..len];
             return;
@@ -423,12 +444,85 @@ pub const Streaming = struct {
             .utf16le => {
                 try reader.fillBufferUtf16(.little);
             },
+            .iso_8859_1, .us_ascii => {
+                try reader.fillBufferSingleByte();
+            },
         }
     }
 
-    /// Transcodes UTF-16 from the input buffer into UTF-8 in the document
-    /// buffer. Invalid UTF-16 is transcoded to invalid UTF-8.
-    fn fillBufferUtf16(reader: *Streaming, endian: std.builtin.Endian) !void {
+    /// Decodes the bytes of a single-byte encoding in the input buffer into
+    /// UTF-8 in the document buffer.
+    fn fillBufferSingleByte(reader: *Streaming) !void {
+        reader.flushTranscodeBuf();
+        while (reader.avail < reader.buf.len) {
+            const byte = reader.in.takeByte() catch |err| switch (err) {
+                error.ReadFailed => return error.ReadFailed,
+                error.EndOfStream => break,
+            };
+            var utf8_buf: [2]u8 = undefined;
+            const utf8 = reader.decodeSingleByte(byte, &utf8_buf);
+            const can_copy = @min(utf8.len, reader.buf.len - reader.avail);
+            @memcpy(reader.buf[reader.avail..][0..can_copy], utf8[0..can_copy]);
+            reader.avail += can_copy;
+            const must_store = utf8[can_copy..];
+            @memcpy(reader.transcode_buf[0..must_store.len], must_store);
+            reader.transcode_buf_len = @intCast(must_store.len);
+        }
+    }
+
+    /// Decodes the bytes from `undecoded_start` to `avail`, which were read as
+    /// UTF-8 before the XML declaration switched to a single-byte encoding.
+    fn decodeBuffered(reader: *Streaming, undecoded_start: usize) Allocator.Error!void {
+        assert(reader.transcode_buf_len == 0);
+        const undecoded = reader.buf[undecoded_start..reader.avail];
+        const decoded_len = switch (reader.state) {
+            .iso_8859_1 => decoded_len: {
+                var non_ascii_count: usize = 0;
+                for (undecoded) |byte| non_ascii_count += @intFromBool(byte >= 0x80);
+                break :decoded_len undecoded.len + non_ascii_count;
+            },
+            .us_ascii => undecoded.len,
+            else => unreachable,
+        };
+        const decoded_end = undecoded_start + decoded_len;
+        if (decoded_end > reader.buf.len) {
+            reader.buf = try reader.gpa.realloc(reader.buf, std.math.ceilPowerOfTwoAssert(usize, decoded_end));
+        }
+        // Decoding back to front, every byte is read before its position is overwritten.
+        var undecoded_pos = reader.avail;
+        var decoded_pos = decoded_end;
+        while (undecoded_pos > undecoded_start) {
+            undecoded_pos -= 1;
+            var utf8_buf: [2]u8 = undefined;
+            const utf8 = reader.decodeSingleByte(reader.buf[undecoded_pos], &utf8_buf);
+            decoded_pos -= utf8.len;
+            @memcpy(reader.buf[decoded_pos..][0..utf8.len], utf8);
+        }
+        assert(decoded_pos == undecoded_start);
+        reader.avail = decoded_end;
+    }
+
+    /// Bytes which are not valid in the encoding become invalid UTF-8, so the
+    /// reader reports them as `ErrorCode.invalid_encoding`.
+    fn decodeSingleByte(reader: *const Streaming, byte: u8, utf8: *[2]u8) []const u8 {
+        if (byte < 0x80) {
+            utf8[0] = byte;
+            return utf8[0..1];
+        }
+        switch (reader.state) {
+            .iso_8859_1 => {
+                utf8.* = .{ 0xC0 | (byte >> 6), 0x80 | (byte & 0x3F) };
+                return utf8;
+            },
+            .us_ascii => {
+                utf8[0] = 0xFF;
+                return utf8[0..1];
+            },
+            else => unreachable,
+        }
+    }
+
+    fn flushTranscodeBuf(reader: *Streaming) void {
         if (reader.transcode_buf_len > 0) {
             const can_copy = @min(reader.transcode_buf_len, reader.buf.len - reader.avail);
             @memcpy(reader.buf[reader.avail..][0..can_copy], reader.transcode_buf[0..can_copy]);
@@ -436,6 +530,12 @@ pub const Streaming = struct {
             reader.transcode_buf_len -= can_copy;
             reader.avail += can_copy;
         }
+    }
+
+    /// Transcodes UTF-16 from the input buffer into UTF-8 in the document
+    /// buffer. Invalid UTF-16 is transcoded to invalid UTF-8.
+    fn fillBufferUtf16(reader: *Streaming, endian: std.builtin.Endian) !void {
+        reader.flushTranscodeBuf();
 
         while (reader.avail < reader.buf.len) {
             const cp: u21 = cp: {
@@ -486,12 +586,27 @@ pub const Streaming = struct {
     }
 
     fn checkEncoding(reader: *Reader, encoding: []const u8) bool {
-        const self: *const Streaming = @alignCast(@fieldParentPtr("interface", reader));
-        return switch (self.state) {
+        const self: *Streaming = @alignCast(@fieldParentPtr("interface", reader));
+        switch (self.state) {
             .start => unreachable, // Can't check encoding before reading anything.
-            .utf8 => std.ascii.eqlIgnoreCase(encoding, "UTF-8"),
-            .utf16be, .utf16le => std.ascii.eqlIgnoreCase(encoding, "UTF-16"),
-        };
+            .utf8 => {
+                if (std.ascii.eqlIgnoreCase(encoding, "UTF-8")) return true;
+                self.state = if (std.ascii.eqlIgnoreCase(encoding, "ISO-8859-1"))
+                    .iso_8859_1
+                else if (std.ascii.eqlIgnoreCase(encoding, "US-ASCII"))
+                    .us_ascii
+                else
+                    return false;
+                // The bytes after the XML declaration were read as UTF-8, so
+                // the window ends here and `move` decodes them.
+                assert(std.mem.endsWith(u8, reader.buf[0..reader.pos], "?>"));
+                self.undecoded_start = self.pos + reader.pos;
+                reader.buf = reader.buf[0..reader.pos];
+                return true;
+            },
+            .utf16be, .utf16le => return std.ascii.eqlIgnoreCase(encoding, "UTF-16"),
+            .iso_8859_1, .us_ascii => unreachable, // The encoding is declared only once.
+        }
     }
 };
 
@@ -805,6 +920,115 @@ test xmlDeclarationStandalone {
 
     try expectEqual(.xml_declaration, try reader.read());
     try expectEqual(true, reader.xmlDeclarationStandalone());
+}
+
+/// Returns the root element name declared by the DOCTYPE.
+/// Asserts that the current node is `Node.doctype`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
+pub fn doctypeName(reader: Reader) []const u8 {
+    assert(reader.node == .doctype);
+    return reader.doctypeNameUnchecked();
+}
+
+test doctypeName {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<!DOCTYPE root>
+        \\<root/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.doctype, try reader.read());
+    try expectEqualStrings("root", reader.doctypeName());
+}
+
+fn doctypeNameUnchecked(reader: Reader) []const u8 {
+    return reader.bufSlice(reader.spans.items[0]);
+}
+
+fn doctypeNamePos(reader: Reader) usize {
+    return reader.spans.items[0].start;
+}
+
+/// Returns the public identifier of the DOCTYPE, or null if it has none.
+/// Asserts that the current node is `Node.doctype`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
+pub fn doctypePublicId(reader: Reader) ?[]const u8 {
+    assert(reader.node == .doctype);
+    return reader.doctypePublicIdUnchecked();
+}
+
+test doctypePublicId {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+        \\<svg/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.doctype, try reader.read());
+    try expectEqualStrings("-//W3C//DTD SVG 1.1//EN", reader.doctypePublicId().?);
+}
+
+fn doctypePublicIdUnchecked(reader: Reader) ?[]const u8 {
+    if (reader.spans.items.len < 4) return null;
+    return reader.bufSlice(reader.spans.items[1]);
+}
+
+fn doctypePublicIdPos(reader: Reader) usize {
+    return reader.spans.items[1].start;
+}
+
+/// Returns the system identifier of the DOCTYPE, or null if it has none.
+/// Asserts that the current node is `Node.doctype`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
+pub fn doctypeSystemId(reader: Reader) ?[]const u8 {
+    assert(reader.node == .doctype);
+    if (reader.spans.items.len < 3) return null;
+    return reader.bufSlice(reader.spans.items[reader.spans.items.len - 2]);
+}
+
+test doctypeSystemId {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<!DOCTYPE root SYSTEM "root.dtd">
+        \\<root/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.doctype, try reader.read());
+    try expectEqual(null, reader.doctypePublicId());
+    try expectEqualStrings("root.dtd", reader.doctypeSystemId().?);
+}
+
+/// Returns the internal subset of the DOCTYPE (the content between `[` and
+/// `]`) as it appears in the document, or an empty string if there is none.
+/// The reader checks that the internal subset is well-formed at the level of
+/// markup declarations, comments, PIs and parameter entity references, but
+/// does not process the declarations: entities declared here cannot be
+/// referenced from content, and attribute defaults are not applied.
+/// Asserts that the current node is `Node.doctype`.
+/// The returned memory is owned by `reader` and valid only until the next call to another reader function..
+pub fn doctypeInternalSubsetRaw(reader: Reader) []const u8 {
+    assert(reader.node == .doctype);
+    return reader.doctypeInternalSubsetUnchecked();
+}
+
+test doctypeInternalSubsetRaw {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<!DOCTYPE root [<!ENTITY e "a>b">]>
+        \\<root/>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.doctype, try reader.read());
+    try expectEqual(null, reader.doctypeSystemId());
+    try expectEqualStrings("<!ENTITY e \"a>b\">", reader.doctypeInternalSubsetRaw());
+}
+
+fn doctypeInternalSubsetUnchecked(reader: Reader) []const u8 {
+    return reader.bufSlice(reader.spans.getLast());
 }
 
 /// Returns the name of the element.
@@ -1738,6 +1962,19 @@ test "namespace binding xmlns uri to non-xmlns prefix is invalid" {
     try expectEqual(.namespace_binding_illegal, reader.errorCode());
 }
 
+test "namespace URI with character references" {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<root xmlns="https://example.com/&#x61;&#98;" xmlns:p="&#x2F;&amp;&#x2F;"><p:a/></root>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("https://example.com/ab", reader.elementNameNs().ns);
+    try expectEqual(.element_start, try reader.read());
+    try expectEqualStrings("/&/", reader.elementNameNs().ns);
+}
+
 test "namespace binding xmlns uri to default namespace is invalid" {
     // The `xmlns` namespace name must not be bound as the default namespace.
     var static_reader: xml.Reader.Static = .init(std.testing.allocator,
@@ -1925,13 +2162,13 @@ pub fn read(reader: *Reader) ReadError!Node {
         .invalid => return error.MalformedXml,
         .start => {
             try reader.shift();
-            try reader.skipBom();
+            const has_bom = try reader.skipBom();
             if (try reader.readMatch("<?")) {
                 try reader.readName();
                 if (std.mem.eql(u8, reader.piTargetUnchecked(), "xml")) {
                     try reader.readXmlDeclarationContent();
                     reader.state = .after_xml_declaration;
-                    try reader.checkXmlDeclaration();
+                    try reader.checkXmlDeclaration(has_bom);
                     break :node .xml_declaration;
                 } else {
                     try reader.readPiContent();
@@ -1955,7 +2192,10 @@ pub fn read(reader: *Reader) ReadError!Node {
                 try reader.checkComment();
                 break :node .comment;
             } else if (try reader.readMatch("<!DOCTYPE")) {
-                return reader.fatal(.doctype_unsupported, reader.pos);
+                try reader.readDoctypeContent();
+                reader.state = .after_doctype;
+                try reader.checkDoctype();
+                break :node .doctype;
             }
             reader.state = .after_doctype;
             continue :node reader.state;
@@ -2127,7 +2367,7 @@ pub fn readElementTextWrite(reader: *Reader, writer: *std.Io.Writer) ReadWriteEr
     const depth = reader.element_names.items.len;
     while (true) {
         switch (try reader.read()) {
-            .xml_declaration, .eof => unreachable,
+            .xml_declaration, .doctype, .eof => unreachable,
             .element_start, .comment, .pi => {},
             .element_end => if (reader.element_names.items.len == depth) return,
             .text => try reader.textWrite(writer),
@@ -2236,7 +2476,7 @@ fn readXmlDeclarationContent(reader: *Reader) !void {
     }
 }
 
-fn checkXmlDeclaration(reader: *Reader) !void {
+fn checkXmlDeclaration(reader: *Reader, has_bom: bool) !void {
     try reader.checkAttributes();
     var state: enum {
         start,
@@ -2255,7 +2495,7 @@ fn checkXmlDeclaration(reader: *Reader) !void {
                 return reader.fatal(.xml_declaration_version_missing, 0);
             },
             .after_version => if (std.mem.eql(u8, name, "encoding")) {
-                try reader.checkXmlEncoding(value, i);
+                try reader.checkXmlEncoding(value, i, has_bom);
                 state = .after_encoding;
             } else if (std.mem.eql(u8, name, "standalone")) {
                 try reader.checkXmlStandalone(value, i);
@@ -2315,10 +2555,74 @@ test checkXmlVersion {
     }
 }
 
-fn checkXmlEncoding(reader: *Reader, encoding: []const u8, n_attr: usize) !void {
-    if (!reader.checkEncoding(encoding)) {
+fn checkXmlEncoding(reader: *Reader, encoding: []const u8, n_attr: usize, has_bom: bool) !void {
+    // A UTF-8 byte order mark contradicts any other declared encoding.
+    if ((has_bom and !std.ascii.eqlIgnoreCase(encoding, "UTF-8")) or !reader.checkEncoding(encoding)) {
         return reader.fatal(.xml_declaration_encoding_unsupported, reader.attributeValuePos(n_attr));
     }
+}
+
+test checkXmlEncoding {
+    const valid_cases = [_]struct { []const u8, []const u8 }{
+        .{ "<?xml version='1.0' encoding='UTF-8'?><r a='\xC3\xA9'>\xC3\xA9</r>", "\xC3\xA9" },
+        .{ "<?xml version='1.0' encoding='ISO-8859-1'?><r a='\xE9'>\xE9</r>", "\xC3\xA9" },
+        .{ "<?xml version='1.0' encoding='iso-8859-1'?><r a='\xFF'>\xFF</r>", "\xC3\xBF" },
+        .{ "<?xml version='1.0' encoding='US-ASCII'?><r a='e'>e</r>", "e" },
+    };
+    for (valid_cases) |case| {
+        const xml_doc, const expected = case;
+        var bytes: std.Io.Reader = .fixed(xml_doc);
+        var streaming_reader: xml.Reader.Streaming = .init(std.testing.allocator, &bytes, .{});
+        defer streaming_reader.deinit();
+        const reader = &streaming_reader.interface;
+        try expectEqual(.xml_declaration, reader.read());
+        try expectEqual(.element_start, reader.read());
+        try expectEqualStrings(expected, try reader.attributeValue(0));
+        try expectEqual(.text, reader.read());
+        try expectEqualStrings(expected, try reader.text());
+        try expectEqual(.element_end, reader.read());
+        try expectEqual(.eof, reader.read());
+    }
+
+    const invalid_cases = [_]struct { []const u8, ErrorCode }{
+        .{ "<?xml version='1.0' encoding='ISO-8859-2'?><r/>", .xml_declaration_encoding_unsupported },
+        .{ "\u{FEFF}<?xml version='1.0' encoding='ISO-8859-1'?><r/>", .xml_declaration_encoding_unsupported },
+        .{ "\u{FEFF}<?xml version='1.0' encoding='UTF-16'?><r/>", .xml_declaration_encoding_unsupported },
+        .{ "<?xml version='1.0' encoding='US-ASCII'?><r>\xC3\xA9</r>", .invalid_encoding },
+    };
+    for (invalid_cases) |case| {
+        const xml_doc, const error_code = case;
+        var bytes: std.Io.Reader = .fixed(xml_doc);
+        var streaming_reader: xml.Reader.Streaming = .init(std.testing.allocator, &bytes, .{});
+        defer streaming_reader.deinit();
+        const reader = &streaming_reader.interface;
+        try expectError(error.MalformedXml, reader.skipDocument());
+        try expectEqual(error_code, reader.errorCode());
+    }
+
+    // Static reads only UTF-8.
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator, "<?xml version='1.0' encoding='ISO-8859-1'?><r/>", .{});
+    defer static_reader.deinit();
+    try expectError(error.MalformedXml, static_reader.interface.read());
+    try expectEqual(.xml_declaration_encoding_unsupported, static_reader.interface.errorCode());
+}
+
+test "streaming ISO-8859-1 longer than the buffer" {
+    const prefix = "<?xml version='1.0' encoding='ISO-8859-1'?>\n<r>";
+    const latin1_text: [5000]u8 = @splat(0xE9);
+    var bytes: std.Io.Reader = .fixed(prefix ++ latin1_text ++ "</r>");
+    var streaming_reader: xml.Reader.Streaming = .init(std.testing.allocator, &bytes, .{});
+    defer streaming_reader.deinit();
+    const reader = &streaming_reader.interface;
+
+    try expectEqual(.xml_declaration, try reader.read());
+    try expectEqual(.element_start, try reader.read());
+    try expectEqual(.text, try reader.read());
+    const utf8_text = reader.textRaw();
+    try expectEqual(2 * latin1_text.len, utf8_text.len);
+    for (0..latin1_text.len) |i| try expectEqualStrings("\xC3\xA9", utf8_text[2 * i ..][0..2]);
+    try expectEqual(.element_end, try reader.read());
+    try expectEqual(.eof, try reader.read());
 }
 
 fn checkXmlStandalone(reader: *Reader, standalone: []const u8, n_attr: usize) !void {
@@ -2501,7 +2805,7 @@ fn addAttributeValueString(reader: *Reader, raw_value: []const u8) !StringIndex 
                     else
                         std.fmt.parseInt(u21, raw_value[i + "&#".len .. entity_end], 10) catch unreachable;
                     try reader.strings.ensureUnusedCapacity(reader.gpa, 4);
-                    reader.strings.items.len += std.unicode.utf8Encode(c, reader.strings.items) catch unreachable;
+                    reader.strings.items.len += std.unicode.utf8Encode(c, reader.strings.unusedCapacitySlice()) catch unreachable;
                 } else {
                     const expansion = predefined_entities.get(raw_value[i + "&".len .. entity_end]) orelse unreachable;
                     try reader.strings.appendSlice(reader.gpa, expansion);
@@ -2563,18 +2867,213 @@ fn readPiContent(reader: *Reader) !void {
 }
 
 fn checkPi(reader: *Reader) !void {
-    const target = reader.piTargetUnchecked();
+    try reader.checkPiSpans(reader.spans.items[0], reader.spans.items[1]);
+}
+
+fn checkPiSpans(reader: *Reader, target_span: BufSpan, data_span: BufSpan) !void {
+    const target = reader.bufSlice(target_span);
     if (std.ascii.eqlIgnoreCase(target, "xml")) {
-        return reader.fatal(.pi_target_disallowed, reader.piTargetPos());
+        return reader.fatal(.pi_target_disallowed, target_span.start);
     }
-    try reader.checkName(target, reader.piTargetPos());
+    try reader.checkName(target, target_span.start);
     if (reader.options.namespace_aware and std.mem.indexOfScalar(u8, target, ':') != null) {
-        return reader.fatal(.name_malformed, reader.piTargetPos());
+        return reader.fatal(.name_malformed, target_span.start);
     }
-    if (reader.piTargetEndPos() == reader.piDataPos() and reader.piDataEndPos() > reader.piDataPos()) {
-        return reader.fatal(.pi_missing_space, reader.piDataPos());
+    if (target_span.end == data_span.start and data_span.end > data_span.start) {
+        return reader.fatal(.pi_missing_space, data_span.start);
     }
-    try reader.checkChars(reader.piDataUnchecked(), reader.piDataPos());
+    try reader.checkChars(reader.bufSlice(data_span), data_span.start);
+}
+
+fn readDoctypeContent(reader: *Reader) !void {
+    try reader.readDoctypeSpace();
+    try reader.readName();
+    const space_start = reader.pos;
+    try reader.readSpace();
+    if (reader.pos > space_start) {
+        if (try reader.readMatch("SYSTEM")) {
+            try reader.readDoctypeSpace();
+            try reader.readQuotedValue();
+            try reader.readSpace();
+        } else if (try reader.readMatch("PUBLIC")) {
+            try reader.readDoctypeSpace();
+            try reader.readQuotedValue();
+            try reader.readDoctypeSpace();
+            try reader.readQuotedValue();
+            try reader.readSpace();
+        }
+    }
+    if (try reader.readMatch("[")) {
+        try reader.readDoctypeInternalSubset();
+        try reader.readSpace();
+    } else {
+        try reader.spans.append(reader.gpa, .{ .start = reader.pos, .end = reader.pos });
+    }
+    if (!try reader.readMatch(">")) return reader.fatalDoctype();
+}
+
+/// Reads up to and including the `]` closing the internal subset, checking
+/// its structure but not the content of the markup declarations.
+fn readDoctypeInternalSubset(reader: *Reader) !void {
+    const start = reader.pos;
+    while (true) {
+        try reader.readSpace();
+        if (try reader.readMatch("]")) {
+            try reader.spans.append(reader.gpa, .{ .start = start, .end = reader.pos - "]".len });
+            return;
+        } else if (try reader.readMatch("%")) {
+            try reader.readName();
+            const name_span = reader.spans.pop().?;
+            try reader.checkName(reader.bufSlice(name_span), name_span.start);
+            if (!try reader.readMatch(";")) return reader.fatal(.entity_reference_unclosed, reader.pos);
+        } else if (try reader.readMatch("<?")) {
+            try reader.readName();
+            try reader.readPiContent();
+            const data_span = reader.spans.pop().?;
+            const target_span = reader.spans.pop().?;
+            try reader.checkPiSpans(target_span, data_span);
+        } else if (try reader.readMatch("<!--")) {
+            try reader.readCommentContent();
+            _ = reader.spans.pop().?;
+        } else if (try reader.readMatch("<!ELEMENT") or
+            try reader.readMatch("<!ATTLIST") or
+            try reader.readMatch("<!ENTITY") or
+            try reader.readMatch("<!NOTATION"))
+        {
+            try reader.readDoctypeSpace();
+            try reader.readMarkupDeclarationRest();
+        } else {
+            return reader.fatalDoctype();
+        }
+    }
+}
+
+/// Skips to after the `>` ending a markup declaration, skipping over quoted
+/// literals, which may contain `>`.
+fn readMarkupDeclarationRest(reader: *Reader) !void {
+    while (true) {
+        if (reader.pos == reader.buf.len) {
+            try reader.more();
+            if (reader.pos == reader.buf.len) return reader.fatal(.doctype_unclosed, reader.pos);
+        }
+        switch (reader.buf[reader.pos]) {
+            '>' => {
+                reader.pos += 1;
+                return;
+            },
+            '"', '\'' => {
+                try reader.readQuotedValue();
+                _ = reader.spans.pop().?;
+            },
+            else => reader.pos += 1,
+        }
+    }
+}
+
+fn readDoctypeSpace(reader: *Reader) !void {
+    const start = reader.pos;
+    try reader.readSpace();
+    if (reader.pos == start) return reader.fatalDoctype();
+}
+
+fn fatalDoctype(reader: *Reader) error{MalformedXml} {
+    return reader.fatal(if (reader.pos == reader.buf.len) .doctype_unclosed else .doctype_malformed, reader.pos);
+}
+
+fn checkDoctype(reader: *Reader) !void {
+    try reader.checkName(reader.doctypeNameUnchecked(), reader.doctypeNamePos());
+    if (reader.doctypePublicIdUnchecked()) |public_id| {
+        for (public_id, 0..) |c, i| switch (c) {
+            ' ', '\r', '\n', 'a'...'z', 'A'...'Z', '0'...'9' => {},
+            '-', '\'', '(', ')', '+', ',', '.', '/', ':', '=', '?', ';', '!', '*', '#', '@', '$', '_', '%' => {},
+            else => return reader.fatal(.illegal_character, reader.doctypePublicIdPos() + i),
+        };
+    }
+    for (reader.spans.items[1..]) |span| {
+        try reader.checkChars(reader.bufSlice(span), span.start);
+    }
+}
+
+test checkDoctype {
+    const valid_cases = [_][]const u8{
+        "<!DOCTYPE root>",
+        "<!DOCTYPE root >",
+        "<!DOCTYPE root[]>",
+        "<!DOCTYPE root SYSTEM 'a\"b'>",
+        "<!DOCTYPE root SYSTEM \"\"[]>",
+        "<!DOCTYPE root PUBLIC '-//A//B' \"http://example.com/a.dtd\" >",
+        "<!DOCTYPE root [ %pe; <!-- ] > --> <?pi ]>?> <!ATTLIST root a CDATA ']>'> <!ENTITY e \"x>y\"> ] >",
+        "<!DOCTYPE root [<!ELEMENT root EMPTY><!NOTATION n SYSTEM \"n\">]>",
+    };
+    for (valid_cases) |doctype| {
+        const xml_doc = try std.fmt.allocPrint(std.testing.allocator, "{s}<root/>", .{doctype});
+        defer std.testing.allocator.free(xml_doc);
+        var static_reader: xml.Reader.Static = .init(std.testing.allocator, xml_doc, .{});
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+        try expectEqual(.doctype, reader.read());
+        try expectEqualStrings("root", reader.doctypeName());
+        try expectEqual(.element_start, reader.read());
+    }
+
+    const invalid_cases = [_]struct { []const u8, ErrorCode }{
+        .{ "<!DOCTYPEroot>", .doctype_malformed },
+        .{ "<!DOCTYPE 1root>", .name_malformed },
+        .{ "<!DOCTYPE root SYSTEM>", .doctype_malformed },
+        .{ "<!DOCTYPE root system \"s\">", .doctype_malformed },
+        .{ "<!DOCTYPE root SYSTEM\"s\">", .doctype_malformed },
+        .{ "<!DOCTYPE root PUBLIC \"p\">", .doctype_malformed },
+        .{ "<!DOCTYPE root PUBLIC \"{\" \"s\">", .illegal_character },
+        .{ "<!DOCTYPE root SYSTEM \"s\" junk>", .doctype_malformed },
+        .{ "<!DOCTYPE root [ <!FOO> ]>", .doctype_malformed },
+        .{ "<!DOCTYPE root [ <!ELEMENTroot EMPTY> ]>", .doctype_malformed },
+        .{ "<!DOCTYPE root [ <!ELEMENT root EMPTY> ] ]>", .doctype_malformed },
+        .{ "<!DOCTYPE root [ %pe ]>", .entity_reference_unclosed },
+        .{ "<!DOCTYPE root [ <?xml version='1.0'?> ]>", .pi_target_disallowed },
+        .{ "<!DOCTYPE root [ <!-- a -- b --> ]>", .comment_malformed },
+        .{ "<!DOCTYPE root [ \x01 ]>", .doctype_malformed },
+        .{ "<!DOCTYPE root [ <!ENTITY e \"\x01\"> ]>", .illegal_character },
+        .{ "<!DOCTYPE root [ <!ENTITY e \"x\">", .doctype_unclosed },
+        .{ "<!DOCTYPE root [ <!ENTITY e \"x", .missing_end_quote },
+        .{ "<!DOCTYPE root", .doctype_unclosed },
+        .{ "<!DOCTYPE", .doctype_unclosed },
+    };
+    for (invalid_cases) |case| {
+        const doctype, const error_code = case;
+        var static_reader: xml.Reader.Static = .init(std.testing.allocator, doctype, .{});
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+        try expectError(error.MalformedXml, reader.read());
+        try expectEqual(error_code, reader.errorCode());
+    }
+}
+
+test "DOCTYPE is only allowed once and before the root element" {
+    const invalid_cases = [_][]const u8{
+        "<!DOCTYPE root><!DOCTYPE root><root/>",
+        "<root/><!DOCTYPE root>",
+        "<root><!DOCTYPE root></root>",
+    };
+    for (invalid_cases) |xml_doc| {
+        var static_reader: xml.Reader.Static = .init(std.testing.allocator, xml_doc, .{});
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+        try expectError(error.MalformedXml, reader.skipDocument());
+    }
+}
+
+test "entities declared in the DOCTYPE are not processed" {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<!DOCTYPE root [<!ENTITY e "x">]>
+        \\<root>&e;</root>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.doctype, try reader.read());
+    try expectEqual(.element_start, try reader.read());
+    try expectError(error.MalformedXml, reader.read());
+    try expectEqual(.entity_reference_undefined, reader.errorCode());
 }
 
 fn readText(reader: *Reader) !void {
@@ -2835,12 +3334,12 @@ fn isChar(c: u21) bool {
     };
 }
 
-fn skipBom(reader: *Reader) !void {
+fn skipBom(reader: *Reader) !bool {
     const bom = "\u{FEFF}";
-    if (std.mem.startsWith(u8, reader.buf[reader.pos..], bom)) {
-        reader.pos += bom.len;
-        try reader.shift();
-    }
+    if (!std.mem.startsWith(u8, reader.buf[reader.pos..], bom)) return false;
+    reader.pos += bom.len;
+    try reader.shift();
+    return true;
 }
 
 test "UTF-8 BOM at start of document" {

@@ -234,12 +234,16 @@ fn runTestParseable(
     var canonical: xml.Writer = .init(gpa, &canonical_output.writer, .{});
     defer canonical.deinit();
 
+    var has_dtd = false;
     while (true) {
         const node = reader.read() catch |err| switch (err) {
             error.MalformedXml => {
                 switch (reader.errorCode()) {
-                    .doctype_unsupported => return results.skip(id, "doctype unsupported", .{}),
                     .xml_declaration_encoding_unsupported => return results.skip(id, "encoding unsupported", .{}),
+                    .entity_reference_undefined => if (has_dtd) return results.skip(id, dtd_unprocessed, .{}) else {
+                        const loc = reader.errorLocation();
+                        return results.fail(id, "malformed: {}:{}: {}", .{ loc.line, loc.column, reader.errorCode() });
+                    },
                     else => |code| {
                         const loc = reader.errorLocation();
                         return results.fail(id, "malformed: {}:{}: {}", .{ loc.line, loc.column, code });
@@ -251,6 +255,7 @@ fn runTestParseable(
         switch (node) {
             .eof => break,
             .xml_declaration, .comment => {}, // ignored in canonical form
+            .doctype => has_dtd = hasDtd(reader),
             .element_start => {
                 try canonical.elementStart(reader.elementName());
 
@@ -292,6 +297,7 @@ fn runTestParseable(
 
     if (output) |expected_canonical| {
         if (!std.mem.eql(u8, canonical_output.written(), expected_canonical)) {
+            if (has_dtd) return results.skip(id, dtd_unprocessed, .{});
             return results.fail(
                 id,
                 "canonical output does not match\n\nexpected:\n{s}\n\nactual:{s}",
@@ -317,17 +323,34 @@ fn runTestUnparseable(
     defer streaming_reader.deinit();
     const reader = &streaming_reader.interface;
 
+    var has_dtd = false;
     while (true) {
         const node = reader.read() catch |err| switch (err) {
             error.MalformedXml => switch (reader.errorCode()) {
-                .doctype_unsupported => return results.skip(id, "doctype unsupported", .{}),
                 .xml_declaration_encoding_unsupported => return results.skip(id, "encoding unsupported", .{}),
                 else => return results.pass(id),
             },
             else => |other| return other,
         };
-        if (node == .eof) return results.fail(id, "expected to fail to parse", .{});
+        switch (node) {
+            .doctype => has_dtd = hasDtd(reader),
+            .eof => if (has_dtd) {
+                return results.skip(id, dtd_unprocessed, .{});
+            } else {
+                return results.fail(id, "expected to fail to parse", .{});
+            },
+            else => {},
+        }
     }
+}
+
+const dtd_unprocessed = "DTD declarations are not processed";
+
+/// Whether the DOCTYPE has declarations the reader does not process, which may
+/// explain a difference from the expected result.
+fn hasDtd(reader: *xml.Reader) bool {
+    return reader.doctypeSystemId() != null or
+        std.mem.trim(u8, reader.doctypeInternalSubsetRaw(), " \t\r\n").len > 0;
 }
 
 const TestType = enum {
