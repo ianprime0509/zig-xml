@@ -222,7 +222,10 @@ pub const VTable = struct {
     /// The new start of the window must not exceed the document's length.
     move: *const fn (reader: *Reader, advance: usize, len: usize) MoveError!void,
     /// Returns whether `encoding` is a supported value for the encoding in the
-    /// XML declaration.
+    /// XML declaration. If it is, the document content after the current
+    /// position, the end of the XML declaration, must be decoded using it. To
+    /// that end, the implementation may shorten the window to end at the
+    /// current position.
     ///
     /// At least one call to `moveFn` must be made before calling this function.
     checkEncoding: *const fn (reader: *Reader, encoding: []const u8) bool,
@@ -309,7 +312,8 @@ test Static {
     try expectEqual(.eof, try reader.read());
 }
 
-/// Reads a UTF-8 or UTF-16 encoded XML document from a `std.Io.Reader`.
+/// Reads a UTF-8 or UTF-16 encoded XML document from a `std.Io.Reader`, or an
+/// ISO-8859-1 or US-ASCII encoded one if declared in its XML declaration.
 pub const Streaming = struct {
     in: *std.Io.Reader,
     state: enum {
@@ -317,8 +321,13 @@ pub const Streaming = struct {
         utf8,
         utf16be,
         utf16le,
+        iso_8859_1,
+        us_ascii,
     },
     err: ?StreamError = null,
+    /// The start of the bytes in `buf` which were read before the XML
+    /// declaration switched to a single-byte encoding and are not yet decoded.
+    undecoded_start: ?usize = null,
 
     transcode_buf: [3]u8,
     transcode_buf_len: u2,
@@ -369,6 +378,13 @@ pub const Streaming = struct {
     fn move(reader: *Reader, advance: usize, len: usize) MoveError!void {
         const self: *Streaming = @alignCast(@fieldParentPtr("interface", reader));
         self.pos += advance;
+        if (self.undecoded_start) |undecoded_start| {
+            self.decodeBuffered(undecoded_start) catch |err| {
+                self.err = err;
+                return error.ReadFailed;
+            };
+            self.undecoded_start = null;
+        }
         if (len <= self.avail - self.pos) {
             reader.buf = self.buf[self.pos..][0..len];
             return;
@@ -423,12 +439,85 @@ pub const Streaming = struct {
             .utf16le => {
                 try reader.fillBufferUtf16(.little);
             },
+            .iso_8859_1, .us_ascii => {
+                try reader.fillBufferSingleByte();
+            },
         }
     }
 
-    /// Transcodes UTF-16 from the input buffer into UTF-8 in the document
-    /// buffer. Invalid UTF-16 is transcoded to invalid UTF-8.
-    fn fillBufferUtf16(reader: *Streaming, endian: std.builtin.Endian) !void {
+    /// Decodes the bytes of a single-byte encoding in the input buffer into
+    /// UTF-8 in the document buffer.
+    fn fillBufferSingleByte(reader: *Streaming) !void {
+        reader.flushTranscodeBuf();
+        while (reader.avail < reader.buf.len) {
+            const byte = reader.in.takeByte() catch |err| switch (err) {
+                error.ReadFailed => return error.ReadFailed,
+                error.EndOfStream => break,
+            };
+            var utf8_buf: [2]u8 = undefined;
+            const utf8 = reader.decodeSingleByte(byte, &utf8_buf);
+            const can_copy = @min(utf8.len, reader.buf.len - reader.avail);
+            @memcpy(reader.buf[reader.avail..][0..can_copy], utf8[0..can_copy]);
+            reader.avail += can_copy;
+            const must_store = utf8[can_copy..];
+            @memcpy(reader.transcode_buf[0..must_store.len], must_store);
+            reader.transcode_buf_len = @intCast(must_store.len);
+        }
+    }
+
+    /// Decodes the bytes from `undecoded_start` to `avail`, which were read as
+    /// UTF-8 before the XML declaration switched to a single-byte encoding.
+    fn decodeBuffered(reader: *Streaming, undecoded_start: usize) Allocator.Error!void {
+        assert(reader.transcode_buf_len == 0);
+        const undecoded = reader.buf[undecoded_start..reader.avail];
+        const decoded_len = switch (reader.state) {
+            .iso_8859_1 => decoded_len: {
+                var non_ascii_count: usize = 0;
+                for (undecoded) |byte| non_ascii_count += @intFromBool(byte >= 0x80);
+                break :decoded_len undecoded.len + non_ascii_count;
+            },
+            .us_ascii => undecoded.len,
+            else => unreachable,
+        };
+        const decoded_end = undecoded_start + decoded_len;
+        if (decoded_end > reader.buf.len) {
+            reader.buf = try reader.gpa.realloc(reader.buf, std.math.ceilPowerOfTwoAssert(usize, decoded_end));
+        }
+        // Decoding back to front, every byte is read before its position is overwritten.
+        var undecoded_pos = reader.avail;
+        var decoded_pos = decoded_end;
+        while (undecoded_pos > undecoded_start) {
+            undecoded_pos -= 1;
+            var utf8_buf: [2]u8 = undefined;
+            const utf8 = reader.decodeSingleByte(reader.buf[undecoded_pos], &utf8_buf);
+            decoded_pos -= utf8.len;
+            @memcpy(reader.buf[decoded_pos..][0..utf8.len], utf8);
+        }
+        assert(decoded_pos == undecoded_start);
+        reader.avail = decoded_end;
+    }
+
+    /// Bytes which are not valid in the encoding become invalid UTF-8, so the
+    /// reader reports them as `ErrorCode.invalid_encoding`.
+    fn decodeSingleByte(reader: *const Streaming, byte: u8, utf8: *[2]u8) []const u8 {
+        if (byte < 0x80) {
+            utf8[0] = byte;
+            return utf8[0..1];
+        }
+        switch (reader.state) {
+            .iso_8859_1 => {
+                utf8.* = .{ 0xC0 | (byte >> 6), 0x80 | (byte & 0x3F) };
+                return utf8;
+            },
+            .us_ascii => {
+                utf8[0] = 0xFF;
+                return utf8[0..1];
+            },
+            else => unreachable,
+        }
+    }
+
+    fn flushTranscodeBuf(reader: *Streaming) void {
         if (reader.transcode_buf_len > 0) {
             const can_copy = @min(reader.transcode_buf_len, reader.buf.len - reader.avail);
             @memcpy(reader.buf[reader.avail..][0..can_copy], reader.transcode_buf[0..can_copy]);
@@ -436,6 +525,12 @@ pub const Streaming = struct {
             reader.transcode_buf_len -= can_copy;
             reader.avail += can_copy;
         }
+    }
+
+    /// Transcodes UTF-16 from the input buffer into UTF-8 in the document
+    /// buffer. Invalid UTF-16 is transcoded to invalid UTF-8.
+    fn fillBufferUtf16(reader: *Streaming, endian: std.builtin.Endian) !void {
+        reader.flushTranscodeBuf();
 
         while (reader.avail < reader.buf.len) {
             const cp: u21 = cp: {
@@ -486,12 +581,27 @@ pub const Streaming = struct {
     }
 
     fn checkEncoding(reader: *Reader, encoding: []const u8) bool {
-        const self: *const Streaming = @alignCast(@fieldParentPtr("interface", reader));
-        return switch (self.state) {
+        const self: *Streaming = @alignCast(@fieldParentPtr("interface", reader));
+        switch (self.state) {
             .start => unreachable, // Can't check encoding before reading anything.
-            .utf8 => std.ascii.eqlIgnoreCase(encoding, "UTF-8"),
-            .utf16be, .utf16le => std.ascii.eqlIgnoreCase(encoding, "UTF-16"),
-        };
+            .utf8 => {
+                if (std.ascii.eqlIgnoreCase(encoding, "UTF-8")) return true;
+                self.state = if (std.ascii.eqlIgnoreCase(encoding, "ISO-8859-1"))
+                    .iso_8859_1
+                else if (std.ascii.eqlIgnoreCase(encoding, "US-ASCII"))
+                    .us_ascii
+                else
+                    return false;
+                // The bytes after the XML declaration were read as UTF-8, so
+                // the window ends here and `move` decodes them.
+                assert(std.mem.endsWith(u8, reader.buf[0..reader.pos], "?>"));
+                self.undecoded_start = self.pos + reader.pos;
+                reader.buf = reader.buf[0..reader.pos];
+                return true;
+            },
+            .utf16be, .utf16le => return std.ascii.eqlIgnoreCase(encoding, "UTF-16"),
+            .iso_8859_1, .us_ascii => unreachable, // The encoding is declared only once.
+        }
     }
 };
 
@@ -1925,13 +2035,13 @@ pub fn read(reader: *Reader) ReadError!Node {
         .invalid => return error.MalformedXml,
         .start => {
             try reader.shift();
-            try reader.skipBom();
+            const has_bom = try reader.skipBom();
             if (try reader.readMatch("<?")) {
                 try reader.readName();
                 if (std.mem.eql(u8, reader.piTargetUnchecked(), "xml")) {
                     try reader.readXmlDeclarationContent();
                     reader.state = .after_xml_declaration;
-                    try reader.checkXmlDeclaration();
+                    try reader.checkXmlDeclaration(has_bom);
                     break :node .xml_declaration;
                 } else {
                     try reader.readPiContent();
@@ -2236,7 +2346,7 @@ fn readXmlDeclarationContent(reader: *Reader) !void {
     }
 }
 
-fn checkXmlDeclaration(reader: *Reader) !void {
+fn checkXmlDeclaration(reader: *Reader, has_bom: bool) !void {
     try reader.checkAttributes();
     var state: enum {
         start,
@@ -2255,7 +2365,7 @@ fn checkXmlDeclaration(reader: *Reader) !void {
                 return reader.fatal(.xml_declaration_version_missing, 0);
             },
             .after_version => if (std.mem.eql(u8, name, "encoding")) {
-                try reader.checkXmlEncoding(value, i);
+                try reader.checkXmlEncoding(value, i, has_bom);
                 state = .after_encoding;
             } else if (std.mem.eql(u8, name, "standalone")) {
                 try reader.checkXmlStandalone(value, i);
@@ -2315,10 +2425,74 @@ test checkXmlVersion {
     }
 }
 
-fn checkXmlEncoding(reader: *Reader, encoding: []const u8, n_attr: usize) !void {
-    if (!reader.checkEncoding(encoding)) {
+fn checkXmlEncoding(reader: *Reader, encoding: []const u8, n_attr: usize, has_bom: bool) !void {
+    // A UTF-8 byte order mark contradicts any other declared encoding.
+    if ((has_bom and !std.ascii.eqlIgnoreCase(encoding, "UTF-8")) or !reader.checkEncoding(encoding)) {
         return reader.fatal(.xml_declaration_encoding_unsupported, reader.attributeValuePos(n_attr));
     }
+}
+
+test checkXmlEncoding {
+    const valid_cases = [_]struct { []const u8, []const u8 }{
+        .{ "<?xml version='1.0' encoding='UTF-8'?><r a='\xC3\xA9'>\xC3\xA9</r>", "\xC3\xA9" },
+        .{ "<?xml version='1.0' encoding='ISO-8859-1'?><r a='\xE9'>\xE9</r>", "\xC3\xA9" },
+        .{ "<?xml version='1.0' encoding='iso-8859-1'?><r a='\xFF'>\xFF</r>", "\xC3\xBF" },
+        .{ "<?xml version='1.0' encoding='US-ASCII'?><r a='e'>e</r>", "e" },
+    };
+    for (valid_cases) |case| {
+        const xml_doc, const expected = case;
+        var bytes: std.Io.Reader = .fixed(xml_doc);
+        var streaming_reader: xml.Reader.Streaming = .init(std.testing.allocator, &bytes, .{});
+        defer streaming_reader.deinit();
+        const reader = &streaming_reader.interface;
+        try expectEqual(.xml_declaration, reader.read());
+        try expectEqual(.element_start, reader.read());
+        try expectEqualStrings(expected, try reader.attributeValue(0));
+        try expectEqual(.text, reader.read());
+        try expectEqualStrings(expected, try reader.text());
+        try expectEqual(.element_end, reader.read());
+        try expectEqual(.eof, reader.read());
+    }
+
+    const invalid_cases = [_]struct { []const u8, ErrorCode }{
+        .{ "<?xml version='1.0' encoding='ISO-8859-2'?><r/>", .xml_declaration_encoding_unsupported },
+        .{ "\u{FEFF}<?xml version='1.0' encoding='ISO-8859-1'?><r/>", .xml_declaration_encoding_unsupported },
+        .{ "\u{FEFF}<?xml version='1.0' encoding='UTF-16'?><r/>", .xml_declaration_encoding_unsupported },
+        .{ "<?xml version='1.0' encoding='US-ASCII'?><r>\xC3\xA9</r>", .invalid_encoding },
+    };
+    for (invalid_cases) |case| {
+        const xml_doc, const error_code = case;
+        var bytes: std.Io.Reader = .fixed(xml_doc);
+        var streaming_reader: xml.Reader.Streaming = .init(std.testing.allocator, &bytes, .{});
+        defer streaming_reader.deinit();
+        const reader = &streaming_reader.interface;
+        try expectError(error.MalformedXml, reader.skipDocument());
+        try expectEqual(error_code, reader.errorCode());
+    }
+
+    // Static reads only UTF-8.
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator, "<?xml version='1.0' encoding='ISO-8859-1'?><r/>", .{});
+    defer static_reader.deinit();
+    try expectError(error.MalformedXml, static_reader.interface.read());
+    try expectEqual(.xml_declaration_encoding_unsupported, static_reader.interface.errorCode());
+}
+
+test "streaming ISO-8859-1 longer than the buffer" {
+    const prefix = "<?xml version='1.0' encoding='ISO-8859-1'?>\n<r>";
+    const latin1_text: [5000]u8 = @splat(0xE9);
+    var bytes: std.Io.Reader = .fixed(prefix ++ latin1_text ++ "</r>");
+    var streaming_reader: xml.Reader.Streaming = .init(std.testing.allocator, &bytes, .{});
+    defer streaming_reader.deinit();
+    const reader = &streaming_reader.interface;
+
+    try expectEqual(.xml_declaration, try reader.read());
+    try expectEqual(.element_start, try reader.read());
+    try expectEqual(.text, try reader.read());
+    const utf8_text = reader.textRaw();
+    try expectEqual(2 * latin1_text.len, utf8_text.len);
+    for (0..latin1_text.len) |i| try expectEqualStrings("\xC3\xA9", utf8_text[2 * i ..][0..2]);
+    try expectEqual(.element_end, try reader.read());
+    try expectEqual(.eof, try reader.read());
 }
 
 fn checkXmlStandalone(reader: *Reader, standalone: []const u8, n_attr: usize) !void {
@@ -2835,12 +3009,12 @@ fn isChar(c: u21) bool {
     };
 }
 
-fn skipBom(reader: *Reader) !void {
+fn skipBom(reader: *Reader) !bool {
     const bom = "\u{FEFF}";
-    if (std.mem.startsWith(u8, reader.buf[reader.pos..], bom)) {
-        reader.pos += bom.len;
-        try reader.shift();
-    }
+    if (!std.mem.startsWith(u8, reader.buf[reader.pos..], bom)) return false;
+    reader.pos += bom.len;
+    try reader.shift();
+    return true;
 }
 
 test "UTF-8 BOM at start of document" {
