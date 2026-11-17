@@ -2807,6 +2807,88 @@ fn checkDoctype(reader: *Reader) !void {
     }
 }
 
+test checkDoctype {
+    const valid_cases = [_][]const u8{
+        "<!DOCTYPE root>",
+        "<!DOCTYPE root >",
+        "<!DOCTYPE root[]>",
+        "<!DOCTYPE root SYSTEM 'a\"b'>",
+        "<!DOCTYPE root SYSTEM \"\"[]>",
+        "<!DOCTYPE root PUBLIC '-//A//B' \"http://example.com/a.dtd\" >",
+        "<!DOCTYPE root [ %pe; <!-- ] > --> <?pi ]>?> <!ATTLIST root a CDATA ']>'> <!ENTITY e \"x>y\"> ] >",
+        "<!DOCTYPE root [<!ELEMENT root EMPTY><!NOTATION n SYSTEM \"n\">]>",
+    };
+    for (valid_cases) |doctype| {
+        const xml_doc = try std.fmt.allocPrint(std.testing.allocator, "{s}<root/>", .{doctype});
+        defer std.testing.allocator.free(xml_doc);
+        var static_reader: xml.Reader.Static = .init(std.testing.allocator, xml_doc, .{});
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+        try expectEqual(.doctype, reader.read());
+        try expectEqualStrings("root", reader.doctypeName());
+        try expectEqual(.element_start, reader.read());
+    }
+
+    const invalid_cases = [_]struct { []const u8, ErrorCode }{
+        .{ "<!DOCTYPEroot>", .doctype_malformed },
+        .{ "<!DOCTYPE 1root>", .name_malformed },
+        .{ "<!DOCTYPE root SYSTEM>", .doctype_malformed },
+        .{ "<!DOCTYPE root system \"s\">", .doctype_malformed },
+        .{ "<!DOCTYPE root SYSTEM\"s\">", .doctype_malformed },
+        .{ "<!DOCTYPE root PUBLIC \"p\">", .doctype_malformed },
+        .{ "<!DOCTYPE root PUBLIC \"{\" \"s\">", .illegal_character },
+        .{ "<!DOCTYPE root SYSTEM \"s\" junk>", .doctype_malformed },
+        .{ "<!DOCTYPE root [ <!FOO> ]>", .doctype_malformed },
+        .{ "<!DOCTYPE root [ <!ELEMENTroot EMPTY> ]>", .doctype_malformed },
+        .{ "<!DOCTYPE root [ <!ELEMENT root EMPTY> ] ]>", .doctype_malformed },
+        .{ "<!DOCTYPE root [ %pe ]>", .entity_reference_unclosed },
+        .{ "<!DOCTYPE root [ <?xml version='1.0'?> ]>", .pi_target_disallowed },
+        .{ "<!DOCTYPE root [ <!-- a -- b --> ]>", .comment_malformed },
+        .{ "<!DOCTYPE root [ \x01 ]>", .doctype_malformed },
+        .{ "<!DOCTYPE root [ <!ENTITY e \"\x01\"> ]>", .illegal_character },
+        .{ "<!DOCTYPE root [ <!ENTITY e \"x\">", .doctype_unclosed },
+        .{ "<!DOCTYPE root [ <!ENTITY e \"x", .missing_end_quote },
+        .{ "<!DOCTYPE root", .doctype_unclosed },
+        .{ "<!DOCTYPE", .doctype_unclosed },
+    };
+    for (invalid_cases) |case| {
+        const doctype, const error_code = case;
+        var static_reader: xml.Reader.Static = .init(std.testing.allocator, doctype, .{});
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+        try expectError(error.MalformedXml, reader.read());
+        try expectEqual(error_code, reader.errorCode());
+    }
+}
+
+test "DOCTYPE is only allowed once and before the root element" {
+    const invalid_cases = [_][]const u8{
+        "<!DOCTYPE root><!DOCTYPE root><root/>",
+        "<root/><!DOCTYPE root>",
+        "<root><!DOCTYPE root></root>",
+    };
+    for (invalid_cases) |xml_doc| {
+        var static_reader: xml.Reader.Static = .init(std.testing.allocator, xml_doc, .{});
+        defer static_reader.deinit();
+        const reader = &static_reader.interface;
+        try expectError(error.MalformedXml, reader.skipDocument());
+    }
+}
+
+test "entities declared in the DOCTYPE are not processed" {
+    var static_reader: xml.Reader.Static = .init(std.testing.allocator,
+        \\<!DOCTYPE root [<!ENTITY e "x">]>
+        \\<root>&e;</root>
+    , .{});
+    defer static_reader.deinit();
+    const reader = &static_reader.interface;
+
+    try expectEqual(.doctype, try reader.read());
+    try expectEqual(.element_start, try reader.read());
+    try expectError(error.MalformedXml, reader.read());
+    try expectEqual(.entity_reference_undefined, reader.errorCode());
+}
+
 fn readText(reader: *Reader) !void {
     while (true) {
         reader.pos = std.mem.indexOfAnyPos(u8, reader.buf, reader.pos, "&<") orelse reader.buf.len;
